@@ -1,6 +1,14 @@
 {
+  "productName": "Sable",
   "defaultHomeserver": 0,
-  "homeserverList": ["matrix.org", "mozilla.org", "unredacted.org", "sable.moe", "kendama.moe"],
+  "homeserverList": [
+    "matrix.org",
+    "mozilla.org",
+    "unredacted.org",
+    "sable.moe",
+    "kendama.moe",
+    "hopium.club"
+  ],
   "allowCustomHomeservers": true,
   "elementCallUrl": null,
 
@@ -10,12 +18,13 @@
   "pushNotificationDetails": {
     "pushNotifyUrl": "https://sygnal.sable.moe/_matrix/push/v1/notify",
     "vapidPublicKey": "BCnS4SbHjeOaqVFW4wjt5xDt_pYIL62qMzKePfYF9fl9PQU14RieIaObh7nLR_9dQf4sykZa-CTrcjkgMIE1mcg",
-    "webPushAppID": "moe.sable.app.sygnal"
+    "webPushAppID": "moe.sable.app.sygnal",
+    "nativePushAppID": "moe.sable.client.android",
+    "unifiedPushAppID": "moe.sable.up"
   },
 
-  "slidingSync": {
-    "enabled": true
-  },
+  "themeCatalogBaseUrl": "https://raw.githubusercontent.com/SableClient/themes/main/",
+  "themeCatalogApprovedHostPrefixes": ["https://raw.githubusercontent.com/SableClient/themes/"],
 
   "featuredCommunities": {
     "openAsDefault": false,
@@ -41,5 +50,13 @@
   "hashRouter": {
     "enabled": false,
     "basename": "/"
+  },
+
+  "gifs": {
+    "provider": "tenor",
+    "proxyUrl": "gifs.sable.moe",
+    "tenorApiKey": "AIzaSyCZt6SSh5VgVPzD9fhyzG1DprdPRhtoaR4",
+    "klipyApiKey": "pmpZyPifwSulBfELHCbpaOllUfgsjqt9yeImc2XWIcHSWjnAUBw9oueRf4kD5r25",
+    "giphyApiKey": "Gc7131jiJuvI7IdN0HZ1D7nh0ow5BU6g"
   }
 }

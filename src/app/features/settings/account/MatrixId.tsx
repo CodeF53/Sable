@@ -1,9 +1,8 @@
 import { Box, Text, Chip } from 'folds';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { SequenceCard } from '$components/sequence-card';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { SettingTile } from '$components/setting-tile';
 import { copyToClipboard } from '$utils/dom';
-import { SequenceCardStyle } from '$features/settings/styles.css';
 
 export function MatrixId() {
   const mx = useMatrixClient();
@@ -20,6 +19,7 @@ export function MatrixId() {
       >
         <SettingTile
           title={userId}
+          focusId="matrix-id"
           after={
             <Chip variant="Secondary" radii="Pill" onClick={() => copyToClipboard(userId)}>
               <Text size="T200">Copy</Text>

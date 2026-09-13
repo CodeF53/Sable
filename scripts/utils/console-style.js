@@ -1,4 +1,4 @@
-/* eslint-disable no-console */
+/* oxlint-disable no-console */
 import process from 'node:process';
 
 export const ANSI = {
@@ -11,7 +11,7 @@ export const ANSI = {
 export function shouldUseColor() {
   if (process.env.NO_COLOR !== undefined) return false;
   if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true;
-  return Boolean(process.stdout.isTTY);
+  return process.stdout.isTTY;
 }
 
 export function styleText(text, color, enabled) {

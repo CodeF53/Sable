@@ -1,18 +1,20 @@
-import { Box, Text, IconButton, Icon, Icons, Scroll } from 'folds';
-import { Page, PageContent, PageHeader } from '$components/page';
-import { SequenceCard } from '$components/sequence-card';
+import { useEffect } from 'react';
+import { Box, Text, Scroll } from 'folds';
+import { PageContent, SettingsSectionPage } from '$components/page';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { SettingTile } from '$components/setting-tile';
 import { useDeviceIds, useDeviceList, useSplitCurrentDevice } from '$hooks/useDeviceList';
 import { useMatrixClient } from '$hooks/useMatrixClient';
+import type { CryptoBackend } from '$types/matrix-sdk';
 import {
   useDeviceVerificationStatus,
+  useVerifiedDeviceCount,
   useUnverifiedDeviceCount,
   VerificationStatus,
 } from '$hooks/useDeviceVerificationStatus';
 import { useSecretStorageDefaultKeyId, useSecretStorageKeyContent } from '$hooks/useSecretStorage';
-import { useCrossSigningActive } from '$hooks/useCrossSigning';
+import { CrossSigningStatus, useCrossSigningStatus } from '$hooks/useCrossSigning';
 import { BackupRestoreTile } from '$components/BackupRestore';
-import { SequenceCardStyle } from '$features/settings/styles.css';
 import { LocalBackup } from './LocalBackup';
 import { DeviceLogoutBtn, DeviceKeyDetails, DeviceTile, DeviceTilePlaceholder } from './DeviceTile';
 import { OtherDevices } from './OtherDevices';
@@ -33,13 +35,21 @@ function DevicesPlaceholder() {
 }
 
 type DevicesProps = {
+  requestBack?: () => void;
   requestClose: () => void;
 };
-export function Devices({ requestClose }: DevicesProps) {
+export function Devices({ requestBack, requestClose }: DevicesProps) {
   const mx = useMatrixClient();
   const crypto = mx.getCrypto();
-  const crossSigningActive = useCrossSigningActive();
+  const crossSigningStatus = useCrossSigningStatus();
+  const crossSigningActive = crossSigningStatus === CrossSigningStatus.Active;
   const [devices, refreshDeviceList] = useDeviceList();
+
+  useEffect(() => {
+    void (crypto as CryptoBackend | undefined)?.processDeviceLists({
+      changed: [mx.getSafeUserId()],
+    });
+  }, [crypto, mx]);
 
   const [currentDevice, otherDevices] = useSplitCurrentDevice(devices);
   const verificationStatus = useDeviceVerificationStatus(
@@ -49,6 +59,7 @@ export function Devices({ requestClose }: DevicesProps) {
   );
 
   const otherDevicesId = useDeviceIds(otherDevices);
+  const verifiedDeviceCount = useVerifiedDeviceCount(crypto, mx.getSafeUserId(), otherDevicesId);
   const unverifiedDeviceCount = useUnverifiedDeviceCount(
     crypto,
     mx.getSafeUserId(),
@@ -61,21 +72,7 @@ export function Devices({ requestClose }: DevicesProps) {
   );
 
   return (
-    <Page>
-      <PageHeader outlined={false}>
-        <Box grow="Yes" gap="200">
-          <Box grow="Yes" alignItems="Center" gap="200">
-            <Text size="H3" truncate>
-              Devices
-            </Text>
-          </Box>
-          <Box shrink="No">
-            <IconButton onClick={requestClose} variant="Surface">
-              <Icon src={Icons.Cross} />
-            </IconButton>
-          </Box>
-        </Box>
-      </PageHeader>
+    <SettingsSectionPage title="Devices" requestBack={requestBack} requestClose={requestClose}>
       <Box grow="Yes">
         <Scroll hideTrack visibility="Hover">
           <PageContent>
@@ -90,10 +87,14 @@ export function Devices({ requestClose }: DevicesProps) {
                 >
                   <SettingTile
                     title="Device Verification"
+                    focusId="device-verification"
                     description="To verify device identity and grant access to encrypted messages."
                     after={
                       <>
-                        <EnableVerification visible={!crossSigningActive} />
+                        <EnableVerification
+                          visible={!crossSigningActive}
+                          loading={crossSigningStatus === CrossSigningStatus.Unknown}
+                        />
                         {crossSigningActive && (
                           <Box gap="200" alignItems="Center">
                             <VerificationStatusBadge
@@ -124,17 +125,19 @@ export function Devices({ requestClose }: DevicesProps) {
                     >
                       {crypto && <DeviceKeyDetails crypto={crypto} />}
                     </DeviceTile>
-                    {crossSigningActive &&
-                      verificationStatus === VerificationStatus.Unverified &&
-                      defaultSecretStorageKeyId &&
-                      defaultSecretStorageKeyContent && (
-                        <VerifyCurrentDeviceTile
-                          secretStorageKeyId={defaultSecretStorageKeyId}
-                          secretStorageKeyContent={defaultSecretStorageKeyContent}
-                        />
-                      )}
+                    {crossSigningActive && verificationStatus === VerificationStatus.Unverified && (
+                      <VerifyCurrentDeviceTile
+                        secretStorageKeyId={defaultSecretStorageKeyId}
+                        secretStorageKeyContent={defaultSecretStorageKeyContent}
+                        hasVerifiedOtherDevice={(verifiedDeviceCount ?? 0) > 0}
+                      />
+                    )}
                     {crypto && verificationStatus === VerificationStatus.Verified && (
-                      <BackupRestoreTile crypto={crypto} />
+                      <BackupRestoreTile
+                        crypto={crypto}
+                        secretStorageKeyId={defaultSecretStorageKeyId}
+                        secretStorageKeyContent={defaultSecretStorageKeyContent}
+                      />
                     )}
                   </SequenceCard>
                 ) : (
@@ -146,9 +149,7 @@ export function Devices({ requestClose }: DevicesProps) {
                 <OtherDevices
                   devices={otherDevices}
                   refreshDeviceList={refreshDeviceList}
-                  showVerification={
-                    crossSigningActive && verificationStatus === VerificationStatus.Verified
-                  }
+                  showVerification={crossSigningActive}
                 />
               )}
               <LocalBackup />
@@ -156,6 +157,6 @@ export function Devices({ requestClose }: DevicesProps) {
           </PageContent>
         </Scroll>
       </Box>
-    </Page>
+    </SettingsSectionPage>
   );
 }

@@ -1,7 +1,9 @@
-import { FormEventHandler, useCallback, useEffect, useState } from 'react';
-import { Box, Button, color, Icon, Icons, Spinner, Text, toRem } from 'folds';
-import FileSaver from 'file-saver';
-import { SequenceCard } from '$components/sequence-card';
+import type { FormEventHandler } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Box, color, Text, toRem } from 'folds';
+import { ArrowRight, CaretDown, CaretUp, File, menuIcon, X } from '$components/icons/phosphor';
+import { saveFileToDevice } from '$utils/download';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { SettingTile } from '$components/setting-tile';
 import { PasswordInput } from '$components/password-input';
 import { ConfirmPasswordMatch } from '$components/ConfirmPasswordMatch';
@@ -14,7 +16,7 @@ import {
 } from '$utils/MegolmExportEncryption';
 import { useAlive } from '$hooks/useAlive';
 import { useFilePicker } from '$hooks/useFilePicker';
-import { SequenceCardStyle } from '$features/settings/styles.css';
+import { Button } from '$components/button';
 
 type LocalBackupError = Error | FriendlyError;
 
@@ -42,7 +44,7 @@ function ExportKeys() {
         const blob = new Blob([encKeys], {
           type: 'text/plain;charset=us-ascii',
         });
-        FileSaver.saveAs(blob, 'cinny-keys.txt');
+        await saveFileToDevice(blob, 'cinny-keys.txt');
       },
       [mx]
     )
@@ -73,7 +75,7 @@ function ExportKeys() {
   };
 
   return (
-    <SettingTile>
+    <SettingTile focusId="export-messages-data">
       <Box as="form" onSubmit={handleSubmit} direction="Column" gap="100">
         <Box gap="200" alignItems="End">
           <ConfirmPasswordMatch initialValue>
@@ -117,8 +119,10 @@ function ExportKeys() {
             fill="Soft"
             outlined
             radii="300"
-            disabled={exporting}
-            before={exporting ? <Spinner size="200" variant="Secondary" fill="Soft" /> : undefined}
+            loading={exporting}
+            spinnerSize="200"
+            spinnerVariant="Secondary"
+            spinnerFill="Soft"
           >
             <Text as="span" size="B400">
               Export
@@ -142,6 +146,7 @@ function ExportKeysTile() {
     <>
       <SettingTile
         title="Export Messages Data"
+        focusId="export-messages-data"
         description="Save password protected copy of encryption data on your device to decrypt messages later."
         after={
           <Box>
@@ -153,9 +158,7 @@ function ExportKeysTile() {
               fill="Soft"
               outlined
               radii="300"
-              before={
-                <Icon size="100" src={expand ? Icons.ChevronTop : Icons.ChevronBottom} filled />
-              }
+              before={menuIcon(expand ? CaretUp : CaretDown, { weight: 'fill' })}
             >
               <Text as="span" size="B300" truncate>
                 {expand ? 'Collapse' : 'Expand'}
@@ -219,7 +222,7 @@ function ImportKeys({ file, onDone }: ImportKeysProps) {
   };
 
   return (
-    <SettingTile>
+    <SettingTile focusId="import-messages-data">
       <Box as="form" onSubmit={handleSubmit} direction="Column" gap="100">
         <Box gap="200" alignItems="End">
           <Box grow="Yes" direction="Column" gap="100">
@@ -241,8 +244,10 @@ function ImportKeys({ file, onDone }: ImportKeysProps) {
             fill="Soft"
             outlined
             radii="300"
-            disabled={decrypting}
-            before={decrypting ? <Spinner size="200" variant="Secondary" fill="Soft" /> : undefined}
+            loading={decrypting}
+            spinnerSize="200"
+            spinnerVariant="Secondary"
+            spinnerFill="Soft"
           >
             <Text as="span" size="B400">
               Decrypt
@@ -271,6 +276,7 @@ function ImportKeysTile() {
     <>
       <SettingTile
         title="Import Messages Data"
+        focusId="import-messages-data"
         description="Load password protected copy of encryption data from device to decrypt your messages."
         after={
           <Box>
@@ -283,8 +289,8 @@ function ImportKeysTile() {
                 variant="Warning"
                 fill="Solid"
                 radii="300"
-                before={<Icon size="100" src={Icons.File} filled />}
-                after={<Icon size="100" src={Icons.Cross} />}
+                before={menuIcon(File, { weight: 'fill' })}
+                after={menuIcon(X)}
               >
                 <Text as="span" size="B300" truncate>
                   {file.name}
@@ -299,7 +305,7 @@ function ImportKeysTile() {
                 fill="Soft"
                 outlined
                 radii="300"
-                before={<Icon size="100" src={Icons.ArrowRight} />}
+                before={menuIcon(ArrowRight)}
               >
                 <Text as="span" size="B300">
                   Import

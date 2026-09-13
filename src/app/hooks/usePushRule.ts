@@ -1,11 +1,11 @@
-import {
+import type {
   IPushRule,
   IPushRules,
   PushRuleAction,
   PushRuleCondition,
-  PushRuleKind,
   RuleId,
 } from '$types/matrix-sdk';
+import { PushRuleKind } from '$types/matrix-sdk';
 import { useMemo } from 'react';
 
 export type PushRuleData = {
@@ -33,7 +33,7 @@ export const makePushRuleData = (
   },
 });
 
-export const orderedPushRuleKinds: PushRuleKind[] = [
+const orderedPushRuleKinds: PushRuleKind[] = [
   PushRuleKind.Override,
   PushRuleKind.ContentSpecific,
   PushRuleKind.RoomSpecific,
@@ -41,10 +41,7 @@ export const orderedPushRuleKinds: PushRuleKind[] = [
   PushRuleKind.Underride,
 ];
 
-export const getPushRule = (
-  pushRules: IPushRules,
-  ruleId: RuleId | string
-): PushRuleData | undefined => {
+const getPushRule = (pushRules: IPushRules, ruleId: RuleId | string): PushRuleData | undefined => {
   const { global } = pushRules;
 
   let ruleData: PushRuleData | undefined;

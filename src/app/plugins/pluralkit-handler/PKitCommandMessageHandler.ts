@@ -1,13 +1,15 @@
+import type {
+  PerMessageProfileMsc4461,
+  PerMessageProfileProxyAssociationV2,
+} from '$hooks/usePerMessageProfile';
 import {
   addOrUpdatePerMessageProfile,
-  associateProxyWithProfile,
-  dropProxyAssociationForPMP,
+  extractCircumfixProxyTagsFromKey,
   getAllPerMessageProfiles,
   getPerMessageProfileById,
-  PerMessageProfile,
 } from '$hooks/usePerMessageProfile';
 import { sendFeedback } from '$utils/sendFeedbackToUser';
-import { MatrixClient, Room } from 'matrix-js-sdk';
+import type { MatrixClient, Room } from '$types/matrix-sdk';
 import { generateShortId } from '$utils/shortIdGen';
 
 const pkMemberRenameRegex = /^(pk;member)\s+"?([\w\s]+)"?\s*rename\s+"?([\w\s]+)"?$/;
@@ -27,18 +29,19 @@ function regexEscapeFallBackFunc(template: string): string {
 }
 
 /**
+ * @deprecated
  * build a regex to recognize proxies
  * a template can be for example `[text]` or `f:text`
  *
  * @param {string} template
  * @return {*}  {RegExp}
  */
-function buildRegex(template: string): RegExp {
-  const [before, after] = template.split('text');
-  // RegExp.escape is baseline since May 2025
-  // @ts-ignore TS2322
-  const escape = RegExp.escape ?? regexEscapeFallBackFunc;
-  const pattern = `${escape(before)}(.+)${escape(after)}`;
+export function buildProxyRegex({ prefix, suffix }: PerMessageProfileProxyAssociationV2): RegExp {
+  const escape = (s: string) =>
+    // @ts-ignore TS2339 - RegExp.escape is a new/proposed method
+    typeof RegExp.escape === 'function' ? RegExp.escape(s) : regexEscapeFallBackFunc(s);
+
+  const pattern = `${escape(prefix ?? '')}(.+)${escape(suffix ?? '')}`;
   return new RegExp(`^${pattern}$`);
 }
 
@@ -91,13 +94,21 @@ export class PKitCommandMessageHandler {
         return;
       }
       const memberName = cmdParts[2];
+      if (!memberName) {
+        sendFeedback(`malformed input, ${helpTextPkMemberNew}`, this.room, this.mx.getSafeUserId());
+        return;
+      }
       const generatedID = generateShortId(5);
       sendFeedback(
         `adding new member has been created with id: ${generatedID} and name ${memberName}`,
         this.room,
         this.mx.getSafeUserId()
       );
-      addOrUpdatePerMessageProfile(this.mx, { id: generatedID, name: memberName });
+      await addOrUpdatePerMessageProfile(this.mx, {
+        id: generatedID,
+        displayname: memberName,
+        triggers: [],
+      });
       sendFeedback(
         `added new member has been created with id: ${generatedID} and name ${memberName}`,
         this.room,
@@ -127,7 +138,7 @@ export class PKitCommandMessageHandler {
        * The id of the per-message-profile
        */
       const pmpId = (await getAllPerMessageProfiles(this.mx)).find(
-        (pmp) => pmp.name === oldName
+        (pmp) => pmp.displayname === oldName
       )?.id;
       if (!pmpId) {
         sendFeedback(
@@ -150,13 +161,21 @@ export class PKitCommandMessageHandler {
         return;
       }
       // actually change the name
-      pmp.name = newName;
+      if (!newName) {
+        sendFeedback(
+          `malformed input, ${helpTextPkMemberRename}`,
+          this.room,
+          this.mx.getSafeUserId()
+        );
+        return;
+      }
+      pmp.displayname = newName;
       sendFeedback(
         `renaming your profile ${pmpId} from ${oldName} to ${newName}`,
         this.room,
         this.mx.getSafeUserId()
       );
-      addOrUpdatePerMessageProfile(this.mx, pmp);
+      await addOrUpdatePerMessageProfile(this.mx, pmp);
     } else if (pkMemberRemoveProxy.test(this.message)) {
       const cmdParts = pkMemberRemoveProxy.exec(this.message);
       if (!cmdParts) return;
@@ -164,7 +183,7 @@ export class PKitCommandMessageHandler {
       const matchAgainst = cmdParts[3];
       const pmpId = this.useIdInsteadOfNameWherePossible
         ? name
-        : (await getAllPerMessageProfiles(this.mx)).find((pmp) => pmp.name === name)?.id;
+        : (await getAllPerMessageProfiles(this.mx)).find((pmp) => pmp.displayname === name)?.id;
       if (!pmpId) {
         sendFeedback(
           `Persona with ${this.useIdInsteadOfNameWherePossible ? 'id' : 'name'} "${name}" doesn't exist in your records, ${helpTextPkMemberNew}`,
@@ -174,13 +193,33 @@ export class PKitCommandMessageHandler {
         return;
       }
 
-      dropProxyAssociationForPMP(this.mx, matchAgainst);
+      if (!matchAgainst) {
+        sendFeedback(
+          `malformed input, ${helpTextPkMemberRemoveProxy}`,
+          this.room,
+          this.mx.getSafeUserId()
+        );
+        return;
+      }
+      const proxyTags = extractCircumfixProxyTagsFromKey(matchAgainst);
+      const pmp = await getPerMessageProfileById(this.mx, pmpId);
 
-      sendFeedback(
-        `Persona with ${this.useIdInsteadOfNameWherePossible ? 'id' : 'name'} "${name}" (${pmpId}) is now no longer associated with ${matchAgainst}`,
-        this.room,
-        this.mx.getSafeUserId()
-      );
+      if (pmp && proxyTags) {
+        const { prefix, suffix } = proxyTags;
+
+        if (!pmp.triggers) {
+          pmp.triggers = [];
+        }
+        pmp.triggers.push({ prefix, suffix });
+
+        await addOrUpdatePerMessageProfile(this.mx, pmp);
+
+        sendFeedback(
+          `Persona with ${this.useIdInsteadOfNameWherePossible ? 'id' : 'name'} "${name}" (${pmpId}) is now no longer associated with ${matchAgainst}`,
+          this.room,
+          this.mx.getSafeUserId()
+        );
+      }
     } else if (pkMemberNewProxy.test(this.message)) {
       const cmdParts = pkMemberNewProxy.exec(this.message);
       if (!cmdParts) return;
@@ -188,7 +227,7 @@ export class PKitCommandMessageHandler {
       const matchAgainst = cmdParts[4];
       const pmpId = this.useIdInsteadOfNameWherePossible
         ? name
-        : (await getAllPerMessageProfiles(this.mx)).find((pmp) => pmp.name === name)?.id;
+        : (await getAllPerMessageProfiles(this.mx)).find((pmp) => pmp.displayname === name)?.id;
       if (!pmpId) {
         sendFeedback(
           `Persona with ${this.useIdInsteadOfNameWherePossible ? 'id' : 'name'} "${name}" doesn't exist in your records, ${helpTextPkMemberNew}`,
@@ -197,18 +236,48 @@ export class PKitCommandMessageHandler {
         );
         return;
       }
-      const matchAgainstRegExp = buildRegex(matchAgainst);
-      associateProxyWithProfile(this.mx, pmpId, matchAgainst, matchAgainstRegExp, false);
-      sendFeedback(
-        `Persona with ${this.useIdInsteadOfNameWherePossible ? 'id' : 'name'} "${name}" (${pmpId}) is now associated with ${matchAgainst}`,
-        this.room,
-        this.mx.getSafeUserId()
-      );
+      if (!matchAgainst) {
+        sendFeedback(
+          `malformed input, ${helpTextPkMemberNewProxy}`,
+          this.room,
+          this.mx.getSafeUserId()
+        );
+        return;
+      }
+      const proxyTags = extractCircumfixProxyTagsFromKey(matchAgainst);
+
+      if (!proxyTags) {
+        sendFeedback(
+          `malformed input: could not find a prefix and/or suffix, ${helpTextPkMemberNewProxy}`,
+          this.room,
+          this.mx.getSafeUserId()
+        );
+        return;
+      }
+      let pmp = await getPerMessageProfileById(this.mx, pmpId);
+      if (pmp) {
+        const { prefix, suffix } = proxyTags;
+
+        if (!pmp.triggers) {
+          pmp.triggers = [];
+        }
+        pmp.triggers.push({ prefix, suffix });
+
+        await addOrUpdatePerMessageProfile(this.mx, pmp);
+        sendFeedback(
+          `Persona with ${this.useIdInsteadOfNameWherePossible ? 'id' : 'name'} "${name}" (${pmpId}) is now associated with ${matchAgainst}`,
+          this.room,
+          this.mx.getSafeUserId()
+        );
+      }
     } else {
       // default to looking up member info
-      const listOfProfiles: PerMessageProfile[] = await getAllPerMessageProfiles(this.mx);
+      const listOfProfiles: PerMessageProfileMsc4461[] = await getAllPerMessageProfiles(this.mx);
       const stringListOfProfiles: string = listOfProfiles
-        .map((pmp: PerMessageProfile) => `${pmp.id}: ${pmp.name ? pmp.name : '(empty name)'}`)
+        .map(
+          (pmp: PerMessageProfileMsc4461) =>
+            `${pmp.id}: ${pmp.displayname ? pmp.displayname : '(empty name)'}`
+        )
         .join('\n');
       sendFeedback(
         `If you see this, you have messed up a command\n\nYou currently have the following persona set up:\n${stringListOfProfiles}\n\n${helpTextPkMember}`,

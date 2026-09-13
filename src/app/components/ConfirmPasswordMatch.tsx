@@ -1,4 +1,5 @@
-import { ReactNode, RefObject, useCallback, useRef, useState } from 'react';
+import type { ReactNode, RefObject } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useDebounce } from '$hooks/useDebounce';
 
 type ConfirmPasswordMatchProps = {
@@ -6,8 +7,8 @@ type ConfirmPasswordMatchProps = {
   children: (
     match: boolean,
     doMatch: () => void,
-    passRef: RefObject<HTMLInputElement>,
-    confPassRef: RefObject<HTMLInputElement>
+    passRef: RefObject<HTMLInputElement | null>,
+    confPassRef: RefObject<HTMLInputElement | null>
   ) => ReactNode;
 };
 export function ConfirmPasswordMatch({ initialValue, children }: ConfirmPasswordMatchProps) {

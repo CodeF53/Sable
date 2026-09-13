@@ -1,35 +1,27 @@
-import { MouseEventHandler, ReactNode, useCallback, useState } from 'react';
-import {
-  Box,
-  Text,
-  Chip,
-  Icon,
-  Icons,
-  RectCords,
-  PopOut,
-  Menu,
-  config,
-  MenuItem,
-  color,
-} from 'folds';
+import type { MouseEventHandler, ReactNode } from 'react';
+import { useCallback, useState } from 'react';
+import type { RectCords } from 'folds';
+import { Box, Text, Chip, Menu, config, MenuItem, color } from 'folds';
+import { PopOut } from '$components/overlay-stack';
+import { CaretDown, sizedIcon } from '$components/icons/phosphor';
 import FocusTrap from 'focus-trap-react';
-import { SecretStorageKeyContent } from '$types/matrix/accountData';
+import type { SecretStorageKeyContent } from '$types/matrix/accountData';
+import type { CryptoBackend } from '$types/matrix-sdk';
 import { storePrivateKey } from '$client/secretStorageKeys';
 import { stopPropagation } from '$utils/keyboard';
 import { useMatrixClient } from '$hooks/useMatrixClient';
+import { useRefreshDeviceVerificationStatus } from '$hooks/useDeviceVerificationStatus';
+import { restoreCrossSigningFromSecretStorage } from '$utils/matrix-crypto';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
+import { AsyncError } from '$components/AsyncError';
 import { SettingTile } from './setting-tile';
-import { SecretStorageRecoveryKey, SecretStorageRecoveryPassphrase } from './SecretStorage';
+import { SecretStorageKeyMethod, SecretStorageKeyPrompt } from './SecretStorage';
 
-export enum ManualVerificationMethod {
-  RecoveryPassphrase = 'passphrase',
-  RecoveryKey = 'key',
-}
 type ManualVerificationMethodSwitcherProps = {
-  value: ManualVerificationMethod;
-  onChange: (value: ManualVerificationMethod) => void;
+  value: SecretStorageKeyMethod;
+  onChange: (value: SecretStorageKeyMethod) => void;
 };
-export function ManualVerificationMethodSwitcher({
+function ManualVerificationMethodSwitcher({
   value,
   onChange,
 }: ManualVerificationMethodSwitcherProps) {
@@ -39,7 +31,7 @@ export function ManualVerificationMethodSwitcher({
     setMenuCords(evt.currentTarget.getBoundingClientRect());
   };
 
-  const handleSelect = (method: ManualVerificationMethod) => {
+  const handleSelect = (method: SecretStorageKeyMethod) => {
     setMenuCords(undefined);
     onChange(method);
   };
@@ -51,12 +43,12 @@ export function ManualVerificationMethodSwitcher({
         variant="Secondary"
         fill="Soft"
         radii="Pill"
-        before={<Icon size="100" src={Icons.ChevronBottom} />}
+        before={sizedIcon(CaretDown, '100')}
         onClick={handleMenu}
       >
         <Text as="span" size="B300">
-          {value === ManualVerificationMethod.RecoveryPassphrase && 'Recovery Passphrase'}
-          {value === ManualVerificationMethod.RecoveryKey && 'Recovery Key'}
+          {value === SecretStorageKeyMethod.RecoveryPassphrase && 'Recovery Passphrase'}
+          {value === SecretStorageKeyMethod.RecoveryKey && 'Recovery Key'}
         </Text>
       </Chip>
       <PopOut
@@ -82,9 +74,9 @@ export function ManualVerificationMethodSwitcher({
                 <MenuItem
                   size="300"
                   variant="Surface"
-                  aria-selected={value === ManualVerificationMethod.RecoveryPassphrase}
+                  aria-selected={value === SecretStorageKeyMethod.RecoveryPassphrase}
                   radii="300"
-                  onClick={() => handleSelect(ManualVerificationMethod.RecoveryPassphrase)}
+                  onClick={() => handleSelect(SecretStorageKeyMethod.RecoveryPassphrase)}
                 >
                   <Box grow="Yes">
                     <Text size="T300">Recovery Passphrase</Text>
@@ -93,9 +85,9 @@ export function ManualVerificationMethodSwitcher({
                 <MenuItem
                   size="300"
                   variant="Surface"
-                  aria-selected={value === ManualVerificationMethod.RecoveryKey}
+                  aria-selected={value === SecretStorageKeyMethod.RecoveryKey}
                   radii="300"
-                  onClick={() => handleSelect(ManualVerificationMethod.RecoveryKey)}
+                  onClick={() => handleSelect(SecretStorageKeyMethod.RecoveryKey)}
                 >
                   <Box grow="Yes">
                     <Text size="T300">Recovery Key</Text>
@@ -124,26 +116,29 @@ export function ManualVerificationTile({
 
   const hasPassphrase = !!secretStorageKeyContent.passphrase;
   const [method, setMethod] = useState(
-    hasPassphrase
-      ? ManualVerificationMethod.RecoveryPassphrase
-      : ManualVerificationMethod.RecoveryKey
+    hasPassphrase ? SecretStorageKeyMethod.RecoveryPassphrase : SecretStorageKeyMethod.RecoveryKey
   );
+
+  const refreshVerificationStatus = useRefreshDeviceVerificationStatus();
 
   const verifyAndRestoreBackup = useCallback(
     async (recoveryKey: Uint8Array) => {
-      const crypto = mx.getCrypto();
+      const crypto = mx.getCrypto() as CryptoBackend | undefined;
       if (!crypto) {
         throw new Error('Unexpected Error! Crypto object not found.');
       }
 
       storePrivateKey(secretStorageKeyId, recoveryKey);
 
-      await crypto.bootstrapCrossSigning({});
+      await crypto.processDeviceLists({ changed: [mx.getSafeUserId()] });
+      await restoreCrossSigningFromSecretStorage(mx, crypto);
       await crypto.bootstrapSecretStorage({});
 
       await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+
+      refreshVerificationStatus();
     },
-    [mx, secretStorageKeyId]
+    [mx, secretStorageKeyId, refreshVerificationStatus]
   );
 
   const [verifyState, handleDecodedRecoveryKey] = useAsyncCallback<void, Error, [Uint8Array]>(
@@ -171,27 +166,13 @@ export function ManualVerificationTile({
         </Text>
       ) : (
         <Box direction="Column" gap="100">
-          {method === ManualVerificationMethod.RecoveryKey && (
-            <SecretStorageRecoveryKey
-              processing={verifying}
-              keyContent={secretStorageKeyContent}
-              onDecodedRecoveryKey={handleDecodedRecoveryKey}
-            />
-          )}
-          {method === ManualVerificationMethod.RecoveryPassphrase &&
-            secretStorageKeyContent.passphrase && (
-              <SecretStorageRecoveryPassphrase
-                processing={verifying}
-                keyContent={secretStorageKeyContent}
-                passphraseContent={secretStorageKeyContent.passphrase}
-                onDecodedRecoveryKey={handleDecodedRecoveryKey}
-              />
-            )}
-          {verifyState.status === AsyncStatus.Error && (
-            <Text size="T200" style={{ color: color.Critical.Main }}>
-              <b>{verifyState.error.message}</b>
-            </Text>
-          )}
+          <SecretStorageKeyPrompt
+            method={method}
+            processing={verifying}
+            keyContent={secretStorageKeyContent}
+            onDecodedRecoveryKey={handleDecodedRecoveryKey}
+          />
+          <AsyncError state={verifyState} bold />
         </Box>
       )}
     </Box>

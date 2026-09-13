@@ -1,7 +1,7 @@
-import { RoomMember } from '$types/matrix-sdk';
+import type { RoomMember } from '$types/matrix-sdk';
 import { useCallback, useMemo } from 'react';
 
-export const MemberSort = {
+const MemberSort = {
   Ascending: (a: RoomMember, b: RoomMember) =>
     a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1,
   Descending: (a: RoomMember, b: RoomMember) =>
@@ -44,6 +44,12 @@ export const useMemberSortMenu = (): MemberSortItem[] =>
 
 export const useMemberSort = (index: number, memberSort: MemberSortItem[]): MemberSortItem => {
   const item = memberSort[index] ?? memberSort[0];
+  if (!item) {
+    return {
+      name: 'A to Z',
+      sortFn: MemberSort.Ascending,
+    };
+  }
   return item;
 };
 

@@ -1,20 +1,12 @@
-import {
-  ChangeEventHandler,
-  MouseEventHandler,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import type { ChangeEventHandler, MouseEventHandler } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RectCords } from 'folds';
 import {
   Box,
   Chip,
   Text,
-  Icon,
-  Icons,
   Line,
   config,
-  PopOut,
   Menu,
   MenuItem,
   Header,
@@ -23,16 +15,21 @@ import {
   Button,
   Input,
   Badge,
-  RectCords,
 } from 'folds';
-import { SearchOrderBy } from '$types/matrix-sdk';
+import { PopOut } from '$components/overlay-stack';
 import FocusTrap from 'focus-trap-react';
+import { ResponsiveMenu } from '$components/ResponsiveMenu';
+import { useMenuAnchor } from '$hooks/useMenuAnchor';
+import { getRoomIconComponent } from '$components/icons/roomIcons';
+import { Check, sizedIcon, PlusCircle, SortAscending, X } from '$components/icons/phosphor';
+import { SearchOrderBy } from '$types/matrix-sdk';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { getRoomIconSrc } from '$utils/room';
 import { factoryRoomIdByAtoZ } from '$utils/sort';
-import { SearchItemStrGetter, UseAsyncSearchOptions, useAsyncSearch } from '$hooks/useAsyncSearch';
-import { DebounceOptions, useDebounce } from '$hooks/useDebounce';
+import type { SearchItemStrGetter, UseAsyncSearchOptions } from '$hooks/useAsyncSearch';
+import { useAsyncSearch } from '$hooks/useAsyncSearch';
+import type { DebounceOptions } from '$hooks/useDebounce';
+import { useDebounce } from '$hooks/useDebounce';
 import { VirtualTile } from '$components/virtualizer';
 import { stopPropagation } from '$utils/keyboard';
 
@@ -41,69 +38,61 @@ type OrderButtonProps = {
   onChange: (order?: string) => void;
 };
 function OrderButton({ order, onChange }: OrderButtonProps) {
-  const [menuAnchor, setMenuAnchor] = useState<RectCords>();
+  const menuAnchor = useMenuAnchor<HTMLButtonElement>();
   const rankOrder = order === SearchOrderBy.Rank;
 
   const setOrder = (o?: string) => {
-    setMenuAnchor(undefined);
+    menuAnchor.close();
     onChange(o);
   };
   const handleOpenMenu: MouseEventHandler<HTMLButtonElement> = (evt) => {
-    setMenuAnchor(evt.currentTarget.getBoundingClientRect());
+    menuAnchor.openAt(evt.currentTarget);
   };
 
   return (
-    <PopOut
-      anchor={menuAnchor}
+    <ResponsiveMenu
+      anchor={menuAnchor.anchor}
+      requestClose={menuAnchor.close}
       align="End"
       position="Bottom"
-      content={
-        <FocusTrap
-          focusTrapOptions={{
-            initialFocus: false,
-            onDeactivate: () => setMenuAnchor(undefined),
-            clickOutsideDeactivates: true,
-            escapeDeactivates: stopPropagation,
-          }}
-        >
-          <Menu variant="Surface">
-            <Header size="300" variant="Surface" style={{ padding: `0 ${config.space.S300}` }}>
-              <Text size="L400">Sort by</Text>
-            </Header>
-            <Line variant="Surface" size="300" />
-            <div style={{ padding: config.space.S100 }}>
-              <MenuItem
-                onClick={() => setOrder()}
-                variant="Surface"
-                size="300"
-                radii="300"
-                aria-pressed={!rankOrder}
-              >
-                <Text size="T300">Recent</Text>
-              </MenuItem>
-              <MenuItem
-                onClick={() => setOrder(SearchOrderBy.Rank)}
-                variant="Surface"
-                size="300"
-                radii="300"
-                aria-pressed={rankOrder}
-              >
-                <Text size="T300">Relevance</Text>
-              </MenuItem>
-            </div>
-          </Menu>
-        </FocusTrap>
+      menu={
+        <Menu variant="Surface">
+          <Header size="300" variant="Surface" style={{ padding: `0 ${config.space.S300}` }}>
+            <Text size="L400">Sort by</Text>
+          </Header>
+          <Line variant="Surface" size="300" />
+          <div style={{ padding: config.space.S100 }}>
+            <MenuItem
+              onClick={() => setOrder()}
+              variant="Surface"
+              size="300"
+              radii="300"
+              aria-pressed={!rankOrder}
+            >
+              <Text size="T300">Recent</Text>
+            </MenuItem>
+            <MenuItem
+              onClick={() => setOrder(SearchOrderBy.Rank)}
+              variant="Surface"
+              size="300"
+              radii="300"
+              aria-pressed={rankOrder}
+            >
+              <Text size="T300">Relevance</Text>
+            </MenuItem>
+          </div>
+        </Menu>
       }
     >
       <Chip
         variant="SurfaceVariant"
         radii="Pill"
-        after={<Icon size="50" src={Icons.Sort} />}
+        after={sizedIcon(SortAscending, '50')}
         onClick={handleOpenMenu}
       >
         {rankOrder ? <Text size="T200">Relevance</Text> : <Text size="T200">Recent</Text>}
       </Chip>
-    </PopOut>
+    </ResponsiveMenu>
   );
 }
 
@@ -138,7 +127,7 @@ function SelectRoomButton({ roomList, selectedRooms, onChange }: SelectRoomButto
     getRoomNameStr,
     SEARCH_OPTS
   );
-  const rooms = Array.from(searchResult?.items ?? roomList).sort(factoryRoomIdByAtoZ(mx));
+  const rooms = Array.from(searchResult?.items ?? roomList).toSorted(factoryRoomIdByAtoZ(mx));
 
   const virtualizer = useVirtualizer({
     count: rooms.length,
@@ -248,7 +237,7 @@ function SelectRoomButton({ roomList, selectedRooms, onChange }: SelectRoomButto
                     }}
                   >
                     {vItems.map((vItem) => {
-                      const roomId = rooms[vItem.index];
+                      const roomId = rooms[vItem.index]!;
                       const room = mx.getRoom(roomId);
                       if (!room) return null;
                       const selected = localSelected?.includes(roomId);
@@ -267,12 +256,10 @@ function SelectRoomButton({ roomList, selectedRooms, onChange }: SelectRoomButto
                             size="300"
                             radii="300"
                             aria-pressed={selected}
-                            before={
-                              <Icon
-                                size="50"
-                                src={getRoomIconSrc(Icons, room.getType(), room.getJoinRule())}
-                              />
-                            }
+                            before={sizedIcon(
+                              getRoomIconComponent(room.getType(), room.getJoinRule()),
+                              '50'
+                            )}
                           >
                             <Text truncate size="T300">
                               {room.name}
@@ -313,7 +300,7 @@ function SelectRoomButton({ roomList, selectedRooms, onChange }: SelectRoomButto
         onClick={handleOpenMenu}
         variant="SurfaceVariant"
         radii="Pill"
-        before={<Icon size="100" src={Icons.PlusCircle} />}
+        before={sizedIcon(PlusCircle, '100')}
       >
         <Text size="T200">Select Rooms</Text>
       </Chip>
@@ -352,7 +339,7 @@ export function SearchFilters({
         <Chip
           variant={!global ? 'Success' : 'Surface'}
           aria-pressed={!global}
-          before={!global && <Icon size="100" src={Icons.Check} />}
+          before={!global && sizedIcon(Check, '100')}
           outlined
           onClick={() => onGlobalChange()}
         >
@@ -362,7 +349,7 @@ export function SearchFilters({
           <Chip
             variant={global ? 'Success' : 'Surface'}
             aria-pressed={global}
-            before={global && <Icon size="100" src={Icons.Check} />}
+            before={global && sizedIcon(Check, '100')}
             outlined
             onClick={() => onGlobalChange(true)}
           >
@@ -385,10 +372,8 @@ export function SearchFilters({
               variant="Success"
               onClick={() => onSelectedRoomsChange(selectedRooms.filter((rId) => rId !== roomId))}
               radii="Pill"
-              before={
-                <Icon size="50" src={getRoomIconSrc(Icons, room.getType(), room.getJoinRule())} />
-              }
-              after={<Icon size="50" src={Icons.Cross} />}
+              before={sizedIcon(getRoomIconComponent(room.getType(), room.getJoinRule()), '50')}
+              after={sizedIcon(X, '50')}
             >
               <Text size="T200">{room.name}</Text>
             </Chip>

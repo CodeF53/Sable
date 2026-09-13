@@ -1,159 +1,286 @@
-/**
- * Keyboard Shortcuts settings page.
- *
- * Lists all keyboard shortcuts available in Sable in a semantic,
- * screen-reader-friendly dl/dt/dd structure.
- */
-import { Box, Icon, IconButton, Icons, Scroll, Text, config } from 'folds';
-import { Page, PageContent, PageHeader } from '$components/page';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useAtomValue, useSetAtom } from 'jotai';
+import { Box, Button, Scroll, Text, config } from 'folds';
+import { PageContent, SettingsSectionPage } from '$components/page';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
+import { SettingTile } from '$components/setting-tile';
+import { useSetting } from '$state/hooks/settings';
+import { settingsAtom } from '$state/settings';
+import { desktopRuntimeStateAtom, pushDesktopRuntimeStateAtom } from '$state/desktopSettings';
+import { setToggleWindowShortcut } from '$generated/tauri/commands';
+import { isDesktopTauri } from '$utils/platform';
+import {
+  SHORTCUTS,
+  captureShortcut,
+  findShortcutConflict,
+  formatShortcut,
+  getShortcutBinding,
+  isDesktopOnlyShortcut,
+} from '../../../keyboard/shortcuts';
+import type {
+  ShortcutDefinition,
+  ShortcutId,
+  ShortcutOverrides,
+} from '../../../keyboard/shortcuts';
 
-type ShortcutEntry = {
-  keys: string;
-  description: string;
-};
-
-type ShortcutCategory = {
-  name: string;
-  shortcuts: ShortcutEntry[];
-};
-
-function formatKey(key: string): string {
-  const isMac =
-    typeof navigator !== 'undefined' && navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-  return key
-    .replace(/\bmod\b/g, isMac ? '⌘' : 'Ctrl')
-    .replace(/\balt\b/gi, isMac ? '⌥' : 'Alt')
-    .replace(/\bshift\b/gi, '⇧')
-    .replace(/\+/g, '+');
-}
-
-const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
-  {
-    name: 'Navigation',
-    shortcuts: [
-      { keys: 'Alt+N', description: 'Jump to the highest-priority unread room' },
-      { keys: 'Alt+Shift+Down', description: 'Go to next unread room (cycle)' },
-      { keys: 'Alt+Shift+Up', description: 'Go to previous unread room (cycle)' },
-    ],
-  },
-  {
-    name: 'Messages',
-    shortcuts: [
-      { keys: 'Ctrl+Z / ⌘+Z', description: 'Undo in message editor' },
-      { keys: 'Ctrl+Shift+Z / ⌘+Shift+Z', description: 'Redo in message editor' },
-      { keys: 'Ctrl+B / ⌘+B', description: 'Bold' },
-      { keys: 'Ctrl+I / ⌘+I', description: 'Italic' },
-      { keys: 'Ctrl+U / ⌘+U', description: 'Underline' },
-    ],
-  },
-];
-
-function ShortcutRow({ keys, description }: ShortcutEntry) {
-  const parts = keys.split('/').map((k) => k.trim());
+function ShortcutKeys({ binding }: { binding: string | null }) {
+  const label = formatShortcut(binding);
   return (
-    <div
+    <kbd
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: config.space.S400,
-        padding: `${config.space.S100} 0`,
+        fontFamily: 'monospace',
+        fontWeight: 'bold',
+        padding: `0 ${config.space.S100}`,
+        borderRadius: '3px',
+        border: '1px solid currentColor',
+        opacity: binding === null ? 0.6 : 0.8,
+        fontSize: '0.85em',
       }}
     >
-      <Text size="T300" style={{ flex: 1, minWidth: 0 }}>
-        {description}
-      </Text>
-      <span style={{ flexShrink: 0 }} aria-label={parts.join(' or ')}>
-        {parts.map((part, i) => (
-          <span key={part}>
-            {part.split('+').map((seg, si, arr) => (
-              <span key={seg}>
-                <kbd
-                  style={{
-                    fontFamily: 'monospace',
-                    fontWeight: 'bold',
-                    padding: `0 ${config.space.S100}`,
-                    borderRadius: '3px',
-                    border: '1px solid currentColor',
-                    opacity: 0.8,
-                    fontSize: '0.85em',
-                  }}
-                >
-                  {formatKey(seg)}
-                </kbd>
-                {si < arr.length - 1 && (
-                  <span aria-hidden="true" style={{ margin: `0 2px` }}>
-                    +
-                  </span>
-                )}
-              </span>
-            ))}
-            {i < parts.length - 1 && (
-              <Text
-                as="span"
-                size="T200"
-                priority="300"
-                style={{ margin: `0 ${config.space.S100}` }}
-              >
-                {' / '}
-              </Text>
-            )}
-          </span>
-        ))}
-      </span>
-    </div>
+      {label}
+    </kbd>
+  );
+}
+
+type ShortcutRowProps = {
+  shortcut: ShortcutDefinition;
+  binding: string | null;
+  customized: boolean;
+  editing: boolean;
+  error?: string;
+  onEdit: () => void;
+  onReset: () => void;
+};
+
+function ShortcutRow({
+  shortcut,
+  binding,
+  customized,
+  editing,
+  error,
+  onEdit,
+  onReset,
+}: ShortcutRowProps) {
+  return (
+    <SettingTile
+      title={shortcut.label}
+      focusId={`shortcut-${shortcut.id}`}
+      showSettingLinkAction={false}
+      description={
+        editing && !error ? 'Press a shortcut. Backspace removes it; Escape cancels.' : undefined
+      }
+      after={
+        <Box alignItems="Center" gap="200" wrap="Wrap">
+          <ShortcutKeys binding={binding} />
+          <Button
+            variant="Secondary"
+            fill="Soft"
+            outlined
+            size="300"
+            radii="300"
+            onClick={onEdit}
+            aria-label={
+              editing ? `Press a new shortcut for ${shortcut.label}` : `Change ${shortcut.label}`
+            }
+          >
+            <Text size="B300">{editing ? 'Press keys…' : 'Change'}</Text>
+          </Button>
+          {customized && (
+            <Button
+              variant="Critical"
+              fill="Soft"
+              outlined
+              size="300"
+              radii="300"
+              onClick={onReset}
+            >
+              <Text size="B300">Reset</Text>
+            </Button>
+          )}
+        </Box>
+      }
+    >
+      {error && (
+        <Text size="T200" priority="500" aria-live="polite">
+          {error}
+        </Text>
+      )}
+    </SettingTile>
   );
 }
 
 type KeyboardShortcutsProps = {
+  requestBack?: () => void;
   requestClose: () => void;
 };
-export function KeyboardShortcuts({ requestClose }: KeyboardShortcutsProps) {
+
+export function KeyboardShortcuts({ requestBack, requestClose }: KeyboardShortcutsProps) {
+  const isDesktop = isDesktopTauri();
+  const CATEGORIES = isDesktop
+    ? (['General', 'Navigation', 'Messages', 'Global'] as const)
+    : (['General', 'Navigation', 'Messages'] as const);
+  const [overrides, setOverrides] = useSetting(settingsAtom, 'shortcutOverrides');
+  const [editingId, setEditingId] = useState<ShortcutId>();
+  const [error, setError] = useState<string>();
+  const [errorFor, setErrorFor] = useState<ShortcutId>();
+  const [saving, setSaving] = useState(false);
+  const runtimeState = useAtomValue(desktopRuntimeStateAtom);
+  const toggleBinding = runtimeState.toggleWindowShortcut ?? null;
+  const pushRuntimeState = useSetAtom(pushDesktopRuntimeStateAtom);
+
+  const clearError = useCallback(() => {
+    setError(undefined);
+    setErrorFor(undefined);
+  }, []);
+
+  const updateOverride = useCallback(
+    (id: ShortcutId, binding: string | null | undefined) => {
+      setOverrides((current) => {
+        const next = { ...current };
+        if (binding === undefined) delete next[id];
+        else next[id] = binding;
+        return next;
+      });
+      setEditingId(undefined);
+      clearError();
+    },
+    [setOverrides, clearError]
+  );
+
+  const saveBinding = useCallback(
+    async (id: ShortcutId, binding: string | null) => {
+      if (saving) return;
+      if (!isDesktopOnlyShortcut(id)) {
+        updateOverride(id, binding);
+        return;
+      }
+      setSaving(true);
+      try {
+        const nextRuntimeState = await setToggleWindowShortcut({ binding });
+        pushRuntimeState(nextRuntimeState);
+        setEditingId(undefined);
+        clearError();
+      } catch (reason) {
+        setError(
+          typeof reason === 'string' && reason.trim().length > 0
+            ? reason
+            : 'Could not register this shortcut — it may be invalid or already used by another application.'
+        );
+        setErrorFor(id);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [saving, updateOverride, pushRuntimeState, clearError]
+  );
+
+  const effectiveOverrides = useMemo<ShortcutOverrides>(
+    () => ({ ...overrides, 'app.toggleWindow': toggleBinding }),
+    [overrides, toggleBinding]
+  );
+
+  useEffect(() => {
+    const id = editingId;
+    if (!id) return undefined;
+
+    const handleCapture = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') {
+        setEditingId(undefined);
+        clearError();
+        return;
+      }
+      if (saving) return;
+      if (event.key === 'Backspace' || event.key === 'Delete') {
+        void saveBinding(id, null);
+        return;
+      }
+      const binding = captureShortcut(event);
+      if (!binding) return;
+      const conflict = findShortcutConflict(id, binding, effectiveOverrides);
+      if (conflict) {
+        setError(`Already used by “${conflict.label}” in this context.`);
+        setErrorFor(id);
+        return;
+      }
+      void saveBinding(id, binding);
+    };
+
+    window.addEventListener('keydown', handleCapture, true);
+    return () => window.removeEventListener('keydown', handleCapture, true);
+  }, [editingId, effectiveOverrides, saveBinding, saving, clearError]);
+
+  const bindingFor = (shortcut: ShortcutDefinition): string | null =>
+    shortcut.desktopOnly ? toggleBinding : getShortcutBinding(shortcut.id, overrides);
+
+  const customizedFor = (shortcut: ShortcutDefinition): boolean =>
+    shortcut.desktopOnly ? toggleBinding != null : shortcut.id in overrides;
+
   return (
-    <Page>
-      <PageHeader outlined={false}>
-        <Box grow="Yes" gap="200">
-          <Box grow="Yes" alignItems="Center" gap="200">
-            <Text size="H3" as="h1" truncate>
-              Keyboard Shortcuts
-            </Text>
-          </Box>
-          <Box shrink="No">
-            <IconButton
-              onClick={requestClose}
-              variant="Surface"
-              aria-label="Close keyboard shortcuts"
-            >
-              <Icon src={Icons.Cross} />
-            </IconButton>
-          </Box>
-        </Box>
-      </PageHeader>
+    <SettingsSectionPage
+      title="Keyboard Shortcuts"
+      titleAs="h1"
+      actionLabel="Close keyboard shortcuts"
+      requestBack={requestBack}
+      requestClose={requestClose}
+    >
       <Box grow="Yes">
         <Scroll hideTrack visibility="Hover">
           <PageContent>
             <Box direction="Column" gap="600">
-              {SHORTCUT_CATEGORIES.map((category) => (
-                <Box key={category.name} direction="Column" gap="200">
+              <Text size="T300" priority="300">
+                Choose Change, then press a new key combination. App-wide shortcuts do not run while
+                typing unless the action specifically supports it.
+              </Text>
+              {CATEGORIES.map((category) => (
+                <Box key={category} direction="Column" gap="100">
                   <Text size="L400" as="h2">
-                    {category.name}
+                    {category}
                   </Text>
-                  <dl style={{ margin: 0 }}>
-                    {category.shortcuts.map((entry) => (
-                      <div key={entry.description}>
-                        <dt style={{ display: 'none' }}>{entry.keys}</dt>
-                        <dd style={{ margin: 0 }}>
-                          <ShortcutRow keys={entry.keys} description={entry.description} />
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
+                  {category === 'Global' && (
+                    <Text size="T300" priority="300">
+                      Shortcuts in the Global section work system-wide, even when Sable is not
+                      focused.
+                    </Text>
+                  )}
+                  <Box direction="Column" gap="100">
+                    {SHORTCUTS.filter((shortcut) => shortcut.category === category).map(
+                      (shortcut) => (
+                        <SequenceCard
+                          key={shortcut.id}
+                          className={SequenceCardStyle}
+                          variant="SurfaceVariant"
+                          direction="Column"
+                        >
+                          <ShortcutRow
+                            shortcut={shortcut}
+                            binding={bindingFor(shortcut)}
+                            customized={customizedFor(shortcut)}
+                            editing={editingId === shortcut.id}
+                            error={errorFor === shortcut.id ? error : undefined}
+                            onEdit={() => {
+                              setEditingId(shortcut.id);
+                              clearError();
+                            }}
+                            onReset={() => {
+                              if (isDesktopOnlyShortcut(shortcut.id)) {
+                                void saveBinding(shortcut.id, null);
+                                return;
+                              }
+                              updateOverride(shortcut.id, undefined);
+                            }}
+                          />
+                        </SequenceCard>
+                      )
+                    )}
+                  </Box>
                 </Box>
               ))}
             </Box>
           </PageContent>
         </Scroll>
       </Box>
-    </Page>
+    </SettingsSectionPage>
   );
 }

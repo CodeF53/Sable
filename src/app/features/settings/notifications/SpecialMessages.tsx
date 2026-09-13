@@ -1,25 +1,21 @@
-import { useCallback, useMemo } from 'react';
-import { ConditionKind, IPushRules, PushRuleKind, RuleId } from '$types/matrix-sdk';
+import { useMemo } from 'react';
+import type { IPushRules } from '$types/matrix-sdk';
+import { ConditionKind, PushRuleKind, RuleId, EventType } from '$types/matrix-sdk';
 import { Box, Text, Badge } from 'folds';
 import { useAccountData } from '$hooks/useAccountData';
-import { AccountDataEvent } from '$types/matrix/accountData';
-import { SequenceCard } from '$components/sequence-card';
+
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { SettingTile } from '$components/setting-tile';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { useUserProfile } from '$hooks/useUserProfile';
 import { getMxIdLocalPart } from '$utils/matrix';
-import { makePushRuleData, PushRuleData, usePushRule } from '$hooks/usePushRule';
-import {
-  getNotificationModeActions,
-  NotificationMode,
-  NotificationModeOptions,
-  useNotificationModeActions,
-} from '$hooks/useNotificationMode';
-import { SequenceCardStyle } from '$features/settings/styles.css';
-import { NotificationModeSwitcher } from './NotificationModeSwitcher';
+import type { PushRuleData } from '$hooks/usePushRule';
+import { makePushRuleData } from '$hooks/usePushRule';
+import { getNotificationModeActions, NotificationMode } from '$hooks/useNotificationMode';
 import { NotificationLevelsHint } from './NotificationLevelsHint';
+import { NotificationModeSwitcher } from './NotificationModeSwitcher';
 
-const NOTIFY_MODE_OPS: NotificationModeOptions = {
+const NOTIFY_MODE_OPS = {
   highlight: true,
 };
 const getDefaultIsUserMention = (userId: string): PushRuleData =>
@@ -96,27 +92,21 @@ type PushRulesProps = {
   defaultPushRuleData: PushRuleData;
 };
 function MentionModeSwitcher({ ruleId, pushRules, defaultPushRuleData }: PushRulesProps) {
-  const mx = useMatrixClient();
-
-  const { kind, pushRule } = usePushRule(pushRules, ruleId) ?? defaultPushRuleData;
-  const getModeActions = useNotificationModeActions(NOTIFY_MODE_OPS);
-
-  const handleChange = useCallback(
-    async (mode: NotificationMode) => {
-      const actions = getModeActions(mode);
-      await mx.setPushRuleActions('global', kind, ruleId, actions);
-    },
-    [mx, getModeActions, kind, ruleId]
+  return (
+    <NotificationModeSwitcher
+      ruleId={ruleId}
+      pushRules={pushRules}
+      defaultPushRuleData={defaultPushRuleData}
+      modeOptions={NOTIFY_MODE_OPS}
+    />
   );
-
-  return <NotificationModeSwitcher pushRule={pushRule} onChange={handleChange} />;
 }
 
 export function SpecialMessagesNotifications() {
   const mx = useMatrixClient();
   const userId = mx.getUserId()!;
   const { displayName } = useUserProfile(userId);
-  const pushRulesEvt = useAccountData(AccountDataEvent.PushRules);
+  const pushRulesEvt = useAccountData(EventType.PushRules);
   const pushRules = useMemo(
     () => pushRulesEvt?.getContent<IPushRules>() ?? { global: {} },
     [pushRulesEvt]
@@ -146,6 +136,7 @@ export function SpecialMessagesNotifications() {
       >
         <SettingTile
           title={`Mention User ID ("${userId}")`}
+          focusId="mention-user-id"
           after={
             <MentionModeSwitcher
               pushRules={pushRules}
@@ -163,6 +154,7 @@ export function SpecialMessagesNotifications() {
       >
         <SettingTile
           title={`Contains Displayname ${displayName ? `("${displayName}")` : ''}`}
+          focusId="contains-display-name"
           after={
             <MentionModeSwitcher
               pushRules={pushRules}
@@ -180,6 +172,7 @@ export function SpecialMessagesNotifications() {
       >
         <SettingTile
           title={`Contains Username ("${getMxIdLocalPart(userId)}")`}
+          focusId="contains-username"
           after={
             <MentionModeSwitcher
               pushRules={pushRules}
@@ -197,6 +190,7 @@ export function SpecialMessagesNotifications() {
       >
         <SettingTile
           title="Mention @room"
+          focusId="mention-room"
           description="Only triggers if the sender has permission to notify the whole room."
           after={
             intentionalMentions ? (

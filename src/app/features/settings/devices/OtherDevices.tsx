@@ -1,20 +1,51 @@
 import { useCallback, useState } from 'react';
+import { isTauri } from '@tauri-apps/api/core';
 import { Box, Button, config, Menu, Spinner, Text } from 'folds';
-import { AuthDict, IMyDevice, MatrixError } from '$types/matrix-sdk';
-import { SequenceCard } from '$components/sequence-card';
+import type { AuthDict, IAuthData, IMyDevice, MatrixError, UIAFlow } from '$types/matrix-sdk';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { ActionUIA, ActionUIAFlowsLoader } from '$components/ActionUIA';
-import { AsyncState, AsyncStatus, useAsync } from '$hooks/useAsyncCallback';
+import type { AsyncState } from '$hooks/useAsyncCallback';
+import { AsyncStatus, useAsync } from '$hooks/useAsyncCallback';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { useUIAMatrixError } from '$hooks/useUIAFlows';
 import { DeviceVerificationStatus } from '$components/DeviceVerificationStatus';
 import { VerificationStatus } from '$hooks/useDeviceVerificationStatus';
 import { useAuthMetadata } from '$hooks/useAuthMetadata';
-import { withSearchParam } from '$pages/pathUtils';
-import { useAccountManagementActions } from '$hooks/useAccountManagement';
+import { getAccountManagementUrl, useAccountManagementActions } from '$hooks/useAccountManagement';
 import { SettingTile } from '$components/setting-tile';
-import { SequenceCardStyle } from '$features/settings/styles.css';
 import { VerifyOtherDeviceTile } from './Verification';
 import { DeviceDeleteBtn, DeviceTile } from './DeviceTile';
+
+function renderUnsupportedUIAFlow() {
+  return (
+    <Text size="T200">
+      Authentication steps to perform this action are not supported by client.
+    </Text>
+  );
+}
+
+type DeleteDevicesUIAProps = {
+  authData: IAuthData;
+  ongoingFlow: UIAFlow;
+  deleteDevices: (authDict?: AuthDict) => void;
+  onCancel: () => void;
+};
+
+function DeleteDevicesUIA({
+  authData,
+  ongoingFlow,
+  deleteDevices,
+  onCancel,
+}: DeleteDevicesUIAProps) {
+  return (
+    <ActionUIA
+      authData={authData}
+      ongoingFlow={ongoingFlow}
+      action={deleteDevices}
+      onCancel={onCancel}
+    />
+  );
+}
 
 type OtherDevicesProps = {
   devices: IMyDevice[];
@@ -27,34 +58,43 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
   const authMetadata = useAuthMetadata();
   const accountManagementActions = useAccountManagementActions();
 
-  const [deleted, setDeleted] = useState<Set<string>>(new Set());
+  const [deleted, setDeleted] = useState(new Set());
 
   const handleDashboardOIDC = useCallback(() => {
-    const authUrl = authMetadata?.account_management_uri ?? authMetadata?.issuer;
-    if (!authUrl) return;
-
-    window.open(
-      withSearchParam(authUrl, {
-        action: accountManagementActions.sessionsList,
-      }),
-      '_blank'
+    const url = getAccountManagementUrl(
+      authMetadata,
+      accountManagementActions.sessionsList,
+      undefined,
+      mx.getHomeserverUrl()
     );
-  }, [authMetadata, accountManagementActions]);
+    if (!url) return;
+    if (isTauri()) {
+      import('@tauri-apps/plugin-opener')
+        .then(({ openUrl }) => openUrl(url))
+        .catch(() => window.open(url, '_blank'));
+      return;
+    }
+    window.open(url, '_blank');
+  }, [authMetadata, accountManagementActions, mx]);
 
   const handleDeleteOIDC = useCallback(
     (deviceId: string) => {
-      const authUrl = authMetadata?.account_management_uri ?? authMetadata?.issuer;
-      if (!authUrl) return;
-
-      window.open(
-        withSearchParam(authUrl, {
-          action: accountManagementActions.sessionEnd,
-          device_id: deviceId,
-        }),
-        '_blank'
+      const url = getAccountManagementUrl(
+        authMetadata,
+        accountManagementActions.sessionEnd,
+        deviceId,
+        mx.getHomeserverUrl()
       );
+      if (!url) return;
+      if (isTauri()) {
+        import('@tauri-apps/plugin-opener')
+          .then(({ openUrl }) => openUrl(url))
+          .catch(() => window.open(url, '_blank'));
+        return;
+      }
+      window.open(url, '_blank');
     },
-    [authMetadata, accountManagementActions]
+    [authMetadata, accountManagementActions, mx]
   );
 
   const handleToggleDelete = useCallback((deviceId: string) => {
@@ -76,7 +116,7 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
   const deleteDevices = useAsync(
     useCallback(
       async (authDict?: AuthDict) => {
-        await mx.deleteMultipleDevices(Array.from(deleted), authDict);
+        await mx.deleteMultipleDevices(Array.from(deleted) as string[], authDict);
       },
       [mx, deleted]
     ),
@@ -101,11 +141,24 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
     setDeleteState({ status: AsyncStatus.Idle });
   }, []);
 
+  const renderDeleteDevicesUIA = useCallback(
+    (ongoingFlow: UIAFlow) =>
+      authData ? (
+        <DeleteDevicesUIA
+          authData={authData}
+          ongoingFlow={ongoingFlow}
+          deleteDevices={deleteDevices}
+          onCancel={handleCancelAuth}
+        />
+      ) : null,
+    [authData, deleteDevices, handleCancelAuth]
+  );
+
   return devices.length > 0 ? (
     <>
       <Box direction="Column" gap="100">
         <Text size="L400">Others</Text>
-        {authMetadata && (
+        {authMetadata?.account_management_uri && (
           <SequenceCard
             className={SequenceCardStyle}
             variant="SurfaceVariant"
@@ -114,6 +167,7 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
           >
             <SettingTile
               title="Device Dashboard"
+              focusId="device-dashboard"
               description="Manage your devices on OIDC dashboard."
               after={
                 <Button
@@ -131,9 +185,8 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
           </SequenceCard>
         )}
         {devices
-          .sort((d1, d2) => {
-            if (!d1.last_seen_ts || !d2.last_seen_ts) return 0;
-            return d1.last_seen_ts < d2.last_seen_ts ? 1 : -1;
+          .toSorted((d1, d2) => {
+            return (d1.last_seen_ts ?? 0) < (d2.last_seen_ts ?? 0) ? 1 : -1;
           })
           .map((device) => (
             <SequenceCard
@@ -149,13 +202,13 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
                 refreshDeviceList={refreshDeviceList}
                 disabled={deleting}
                 options={
-                  authMetadata ? (
+                  authMetadata?.account_management_uri ? (
                     <DeviceDeleteBtn
                       deviceId={device.device_id}
                       deleted={false}
                       onDeleteToggle={handleDeleteOIDC}
                     />
-                  ) : (
+                  ) : authMetadata ? undefined : (
                     <DeviceDeleteBtn
                       deviceId={device.device_id}
                       deleted={deleted.has(device.device_id)}
@@ -206,22 +259,8 @@ export function OtherDevices({ devices, refreshDeviceList, showVerification }: O
                 </Text>
               )}
               {authData && (
-                <ActionUIAFlowsLoader
-                  authData={authData}
-                  unsupported={() => (
-                    <Text size="T200">
-                      Authentication steps to perform this action are not supported by client.
-                    </Text>
-                  )}
-                >
-                  {(ongoingFlow) => (
-                    <ActionUIA
-                      authData={authData}
-                      ongoingFlow={ongoingFlow}
-                      action={deleteDevices}
-                      onCancel={handleCancelAuth}
-                    />
-                  )}
+                <ActionUIAFlowsLoader authData={authData} unsupported={renderUnsupportedUIAFlow}>
+                  {renderDeleteDevicesUIA}
                 </ActionUIAFlowsLoader>
               )}
             </Box>

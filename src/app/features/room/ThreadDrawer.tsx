@@ -1,352 +1,53 @@
-import { MouseEventHandler, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Header, Icon, IconButton, Icons, Scroll, Text, config } from 'folds';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Header, IconButton, Scroll, Spinner, Text, config, toRem } from 'folds';
+import { Chats, composerIcon, X } from '$components/icons/phosphor';
+import type { IEvent, Room, CryptoBackend } from '$types/matrix-sdk';
 import {
+  Direction,
   MatrixEvent,
-  PushProcessor,
+  MatrixEventEvent,
   ReceiptType,
-  RelationType,
-  Room,
   RoomEvent,
   ThreadEvent,
 } from '$types/matrix-sdk';
-import { useAtomValue, useSetAtom } from 'jotai';
-import { ReactEditor } from 'slate-react';
-import { HTMLReactParserOptions } from 'html-react-parser';
-import { Opts as LinkifyOpts } from 'linkifyjs';
-import { ImageContent, MSticker, RedactedContent, Reply } from '$components/message';
-import { RenderMessageContent } from '$components/RenderMessageContent';
-import { Image } from '$components/media';
-import { ImageViewer } from '$components/image-viewer';
-import { ClientSideHoverFreeze } from '$components/ClientSideHoverFreeze';
+import { useSpaceOptionally } from '$hooks/useSpace';
+import { useTimelineActions } from '$hooks/timeline/useTimelineActions';
+import { useTimelineRendererContext } from '$hooks/timeline/useTimelineRendererContext';
+import { useAtomValue, useSetAtom, useStore } from 'jotai';
 import {
-  factoryRenderLinkifyWithMention,
-  getReactCustomHtmlParser,
-  LINKIFY_OPTS,
-  makeMentionCustomProps,
-  renderMatrixMention,
-} from '$plugins/react-custom-html-parser';
-import {
+  getThreadReplyEvents,
+  isThreadRelationEvent,
+  reactionOrEditEvent,
+  unwrapRelationJumpTarget,
   getEditedEvent,
   getEventReactions,
-  getMemberDisplayName,
-  reactionOrEditEvent,
-} from '$utils/room';
-import { getMxIdLocalPart, toggleReaction } from '$utils/matrix';
-import { minuteDifference } from '$utils/time';
+} from '$utils/room/relations';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
+import { useIsInactivePanel } from '$hooks/useRoom';
 import { nicknamesAtom } from '$state/nicknames';
-import { MessageLayout, MessageSpacing, settingsAtom } from '$state/settings';
+import { profilesCacheAtom } from '$state/userRoomProfile';
+import { settingsAtom } from '$state/settings';
 import { useSetting } from '$state/hooks/settings';
-import { useRoomAbbreviationsContext } from '$hooks/useRoomAbbreviations';
-import { buildAbbrReplaceTextNode } from '$components/message/RenderBody';
-import { createMentionElement, moveCursor, useEditor } from '$components/editor';
-import { useMentionClickHandler } from '$hooks/useMentionClickHandler';
-import { useSpoilerClickHandler } from '$hooks/useSpoilerClickHandler';
-import { GetContentCallback, MessageEvent, StateEvent } from '$types/matrix/room';
-import { usePowerLevelsContext } from '$hooks/usePowerLevels';
-import { useRoomPermissions } from '$hooks/useRoomPermissions';
-import { useRoomCreators } from '$hooks/useRoomCreators';
+import { useEditor } from '$components/editor';
 import { useImagePackRooms } from '$hooks/useImagePackRooms';
 import { useOpenUserRoomProfile } from '$state/hooks/userRoomProfile';
-import { IReplyDraft, roomIdToReplyDraftAtomFamily } from '$state/room/roomInputDrafts';
+import { roomIdToReplyDraftAtomFamily } from '$state/room/roomInputDrafts';
 import { roomToParentsAtom } from '$state/room/roomToParents';
-import { EncryptedContent, Message, Reactions } from './message';
+import { useIgnoredUsers } from '$hooks/useIgnoredUsers';
+import { useMessageEdit } from '$hooks/useMessageEdit';
+import {
+  useProcessedTimeline,
+  getProcessedRowIndexForRawTimelineIndex,
+  type ProcessedEvent,
+} from '$hooks/timeline/useProcessedTimeline';
+import { useTimelineEventRenderer } from '$hooks/timeline/useTimelineEventRenderer';
 import { RoomInput } from './RoomInput';
 import { RoomViewFollowing, RoomViewFollowingPlaceholder } from './RoomViewFollowing';
 import * as css from './ThreadDrawer.css';
-
-/**
- * Resolve the list of reply events to show in the thread drawer.
- *
- * Prefers events from the SDK Thread object (authoritative, full history) but
- * falls back to scanning the main room timeline when the Thread object was
- * created without `initialEvents` (as happens with classic sync).  In that
- * case `thread.events` contains only the root event, so filtering it yields an
- * empty array — we must fall back rather than showing nothing.
- *
- * Exported for unit testing.
- */
-export function getThreadReplyEvents(room: Room, threadRootId: string): MatrixEvent[] {
-  const thread = room.getThread(threadRootId);
-  const fromThread = thread?.events ?? [];
-  const filteredFromThread = fromThread.filter(
-    (ev) => ev.getId() !== threadRootId && !reactionOrEditEvent(ev)
-  );
-  if (filteredFromThread.length > 0) {
-    return filteredFromThread;
-  }
-  return room
-    .getUnfilteredTimelineSet()
-    .getLiveTimeline()
-    .getEvents()
-    .filter(
-      (ev) =>
-        ev.threadRootId === threadRootId && ev.getId() !== threadRootId && !reactionOrEditEvent(ev)
-    );
-}
-
-type ForwardedMessageProps = {
-  isForwarded: boolean;
-  originalTimestamp: number;
-  originalRoomId: string;
-  originalEventId: string;
-  originalEventPrivate: boolean;
-};
-
-type ThreadMessageProps = {
-  room: Room;
-  mEvent: MatrixEvent;
-  threadRootId: string;
-  editId: string | undefined;
-  onEditId: (id?: string) => void;
-  messageLayout: MessageLayout;
-  messageSpacing: MessageSpacing;
-  canDelete: boolean;
-  canSendReaction: boolean;
-  canPinEvent: boolean;
-  imagePackRooms: Room[];
-  activeReplyId: string | undefined;
-  hour24Clock: boolean;
-  dateFormatString: string;
-  onUserClick: MouseEventHandler<HTMLButtonElement>;
-  onUsernameClick: MouseEventHandler<HTMLButtonElement>;
-  onReplyClick: MouseEventHandler<HTMLButtonElement>;
-  onReactionToggle: (targetEventId: string, key: string, shortcode?: string) => void;
-  onResend?: (event: MatrixEvent) => void;
-  onDeleteFailedSend?: (event: MatrixEvent) => void;
-  pushProcessor: PushProcessor;
-  linkifyOpts: LinkifyOpts;
-  htmlReactParserOptions: HTMLReactParserOptions;
-  showHideReads: boolean;
-  showDeveloperTools: boolean;
-  onReferenceClick: MouseEventHandler<HTMLButtonElement>;
-  jumpToEventId?: string;
-  collapse?: boolean;
-};
-
-function ThreadMessage({
-  room,
-  threadRootId: threadRootIdProp,
-  mEvent,
-  editId,
-  onEditId,
-  messageLayout,
-  messageSpacing,
-  canDelete,
-  canSendReaction,
-  collapse = false,
-  canPinEvent,
-  imagePackRooms,
-  activeReplyId,
-  hour24Clock,
-  dateFormatString,
-  onUserClick,
-  onUsernameClick,
-  onReplyClick,
-  onReactionToggle,
-  onResend,
-  onDeleteFailedSend,
-  pushProcessor,
-  linkifyOpts,
-  htmlReactParserOptions,
-  showHideReads,
-  showDeveloperTools,
-  onReferenceClick,
-  jumpToEventId,
-}: ThreadMessageProps) {
-  // Use the thread's own timeline set so reactions/edits on thread events are found correctly
-  const threadTimelineSet = room.getThread(threadRootIdProp)?.timelineSet;
-  const timelineSet = threadTimelineSet ?? room.getUnfilteredTimelineSet();
-  const mEventId = mEvent.getId()!;
-  const senderId = mEvent.getSender() ?? '';
-  const nicknames = useAtomValue(nicknamesAtom);
-  const senderDisplayName =
-    getMemberDisplayName(room, senderId, nicknames) ?? getMxIdLocalPart(senderId) ?? senderId;
-
-  const [mediaAutoLoad] = useSetting(settingsAtom, 'mediaAutoLoad');
-  const [urlPreview] = useSetting(settingsAtom, 'urlPreview');
-  const [encUrlPreview] = useSetting(settingsAtom, 'encUrlPreview');
-  const showUrlPreview = room.hasEncryptionStateEvent() ? encUrlPreview : urlPreview;
-  const [autoplayStickers] = useSetting(settingsAtom, 'autoplayStickers');
-
-  const editedEvent = getEditedEvent(mEventId, mEvent, timelineSet);
-  const editedNewContent = editedEvent?.getContent()['m.new_content'];
-  const baseContent = mEvent.getContent();
-  const safeContent =
-    Object.keys(baseContent).length > 0 ? baseContent : mEvent.getOriginalContent();
-  const getContent = (() => editedNewContent ?? safeContent) as GetContentCallback;
-
-  const reactionRelations = getEventReactions(timelineSet, mEventId);
-  const reactions = reactionRelations?.getSortedAnnotationsByKey();
-  const hasReactions = reactions && reactions.length > 0;
-
-  const pushActions = pushProcessor.actionsForEvent(mEvent);
-  let notifyHighlight: 'silent' | 'loud' | undefined;
-  if (pushActions?.notify && pushActions.tweaks?.highlight) {
-    notifyHighlight = pushActions.tweaks?.sound ? 'loud' : 'silent';
-  }
-
-  // Extract message forwarding info
-  const forwardContent = safeContent['moe.sable.message.forward'] as
-    | {
-        original_timestamp?: unknown;
-        original_room_id?: string;
-        original_event_id?: string;
-        original_event_private?: boolean;
-      }
-    | undefined;
-
-  const messageForwardedProps: ForwardedMessageProps | undefined = forwardContent
-    ? {
-        isForwarded: true,
-        originalTimestamp:
-          typeof forwardContent.original_timestamp === 'number'
-            ? forwardContent.original_timestamp
-            : mEvent.getTs(),
-        originalRoomId: forwardContent.original_room_id ?? room.roomId,
-        originalEventId: forwardContent.original_event_id ?? '',
-        originalEventPrivate: forwardContent.original_event_private ?? false,
-      }
-    : undefined;
-
-  const { replyEventId } = mEvent;
-
-  const relation = mEvent.getRelation();
-  const contentRelatesTo = mEvent.getContent()?.['m.relates_to'];
-  const isFallback =
-    relation?.is_falling_back === true || contentRelatesTo?.is_falling_back === true;
-
-  return (
-    <Message
-      key={mEvent.getId()}
-      data-message-id={mEventId}
-      room={room}
-      mEvent={mEvent}
-      messageSpacing={messageSpacing}
-      messageLayout={messageLayout}
-      collapse={collapse}
-      highlight={jumpToEventId === mEventId}
-      notifyHighlight={notifyHighlight}
-      edit={editId === mEventId}
-      canDelete={canDelete}
-      canSendReaction={canSendReaction}
-      canPinEvent={canPinEvent}
-      imagePackRooms={imagePackRooms}
-      relations={hasReactions ? reactionRelations : undefined}
-      onUserClick={onUserClick}
-      onUsernameClick={onUsernameClick}
-      onReplyClick={onReplyClick}
-      onReactionToggle={onReactionToggle}
-      onEditId={onEditId}
-      senderId={senderId}
-      senderDisplayName={senderDisplayName}
-      messageForwardedProps={messageForwardedProps}
-      sendStatus={mEvent.getAssociatedStatus()}
-      onResend={onResend}
-      onDeleteFailedSend={onDeleteFailedSend}
-      activeReplyId={activeReplyId ?? null}
-      hour24Clock={hour24Clock}
-      dateFormatString={dateFormatString}
-      hideReadReceipts={showHideReads}
-      showDeveloperTools={showDeveloperTools}
-      reply={
-        replyEventId &&
-        !isFallback && (
-          <Reply
-            room={room}
-            timelineSet={timelineSet}
-            replyEventId={replyEventId}
-            mentions={baseContent['m.mentions']}
-            onClick={onReferenceClick}
-          />
-        )
-      }
-      reactions={
-        hasReactions ? (
-          <Reactions
-            style={{ marginTop: config.space.S200 }}
-            room={room}
-            relations={reactionRelations!}
-            mEventId={mEventId}
-            canSendReaction={canSendReaction}
-            canDeleteOwn={canDelete}
-            onReactionToggle={onReactionToggle}
-          />
-        ) : undefined
-      }
-    >
-      {mEvent.isRedacted() ? (
-        <RedactedContent reason={mEvent.getUnsigned().redacted_because?.content.reason} />
-      ) : (
-        <EncryptedContent mEvent={mEvent}>
-          {() => {
-            if (mEvent.isRedacted())
-              return (
-                <RedactedContent reason={mEvent.getUnsigned().redacted_because?.content.reason} />
-              );
-
-            if (mEvent.getType() === MessageEvent.Sticker)
-              return (
-                <MSticker
-                  content={mEvent.getContent()}
-                  renderImageContent={(props) => (
-                    <ImageContent
-                      {...props}
-                      autoPlay={mediaAutoLoad}
-                      renderImage={(p) => {
-                        if (!autoplayStickers && p.src) {
-                          return (
-                            <ClientSideHoverFreeze src={p.src}>
-                              <Image {...p} loading="lazy" />
-                            </ClientSideHoverFreeze>
-                          );
-                        }
-                        return <Image {...p} loading="lazy" />;
-                      }}
-                      renderViewer={(p) => <ImageViewer {...p} />}
-                    />
-                  )}
-                />
-              );
-
-            if (mEvent.getType() === MessageEvent.RoomMessage) {
-              return (
-                <RenderMessageContent
-                  displayName={senderDisplayName}
-                  msgType={(editedNewContent ?? safeContent).msgtype ?? ''}
-                  ts={mEvent.getTs()}
-                  edited={!!editedEvent}
-                  getContent={getContent}
-                  mediaAutoLoad={mediaAutoLoad}
-                  urlPreview={showUrlPreview}
-                  htmlReactParserOptions={htmlReactParserOptions}
-                  linkifyOpts={linkifyOpts}
-                  outlineAttachment={messageLayout === MessageLayout.Bubble}
-                />
-              );
-            }
-
-            return (
-              <RenderMessageContent
-                displayName={senderDisplayName}
-                msgType={(editedNewContent ?? safeContent).msgtype ?? ''}
-                ts={mEvent.getTs()}
-                edited={!!editedEvent}
-                getContent={getContent}
-                mediaAutoLoad={mediaAutoLoad}
-                urlPreview={showUrlPreview}
-                htmlReactParserOptions={htmlReactParserOptions}
-                linkifyOpts={linkifyOpts}
-                outlineAttachment={messageLayout === MessageLayout.Bubble}
-              />
-            );
-          }}
-        </EncryptedContent>
-      )}
-    </Message>
-  );
-}
+import { SidebarResizer } from '$pages/client/sidebar/SidebarResizer';
+import { isMobileOrTablet } from '$utils/platform';
+import { useDismissOnBack } from '$utils/androidBack';
+import type { Persona } from '$app/persona';
 
 type ThreadDrawerProps = {
   room: Room;
@@ -359,75 +60,68 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
   const mx = useMatrixClient();
   const drawerRef = useRef<HTMLDivElement>(null);
   const editor = useEditor();
-  const [, forceUpdate] = useState(0);
-  const [editId, setEditId] = useState<string | undefined>(undefined);
+  const [forceUpdateCounter, forceUpdate] = useState(0);
   const [jumpToEventId, setJumpToEventId] = useState<string | undefined>(undefined);
+  const [loadingOlderReplies, setLoadingOlderReplies] = useState(false);
+  const [canPageBack, setCanPageBack] = useState(true);
+  const paginatingOlderRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevReplyCountRef = useRef(0);
-  const replyEventsRef = useRef<MatrixEvent[]>([]);
+  const processedEventsRef = useRef<ProcessedEvent[]>([]);
+  const serverFetchAttemptedRef = useRef<string | null>(null);
+  const autoFillInProgressRef = useRef(false);
+  const { editId, handleEdit } = useMessageEdit(editor);
   const nicknames = useAtomValue(nicknamesAtom);
-  const pushProcessor = useMemo(() => new PushProcessor(mx), [mx]);
-  const useAuthentication = useMediaAuthentication();
-  const mentionClickHandler = useMentionClickHandler(room.roomId);
-  const spoilerClickHandler = useSpoilerClickHandler();
+  const jotaiStore = useStore();
+  const getGlobalProfile = useCallback(
+    (userId: string) => jotaiStore.get(profilesCacheAtom)[userId],
+    [jotaiStore]
+  );
+  const pushProcessor = mx.pushProcessor;
+  useDismissOnBack(onClose);
+  const isInactivePanel = useIsInactivePanel();
 
-  // Settings
-  const [messageLayout] = useSetting(settingsAtom, 'messageLayout');
-  const [messageSpacing] = useSetting(settingsAtom, 'messageSpacing');
-  const [hour24Clock] = useSetting(settingsAtom, 'hour24Clock');
-  const [dateFormatString] = useSetting(settingsAtom, 'dateFormatString');
-  const [hideReads] = useSetting(settingsAtom, 'hideReads');
-  const [showDeveloperTools] = useSetting(settingsAtom, 'developerTools');
+  // Shared renderer context — replaces 17+ inline useSetting calls,
+  // linkifyOpts useMemo, htmlReactParserOptions useMemo, and the
+  // permissions block that were duplicated with RoomTimeline.
+  const rendererCtx = useTimelineRendererContext(room);
 
-  // Memoized parsing options
-  const linkifyOpts = useMemo<LinkifyOpts>(
+  const {
+    settings,
+    linkifyOpts,
+    htmlReactParserOptions,
+    permissions: {
+      canRedact,
+      canDeleteOwn,
+      canSendReaction,
+      canPinEvent,
+      isReadOnly,
+      getMemberPowerTag,
+      parseMemberEvent,
+    },
+  } = rendererCtx;
+
+  // ThreadDrawer overrides on top of the shared settings:
+  //   - hideThreadChip: true (thread replies don't show a nested thread chip)
+  //   - hideMembershipEvents: true (thread view never shows membership)
+  //   - hideNickAvatarEvents: true (thread view never shows nick changes)
+  const threadSettings = useMemo(
     () => ({
-      ...LINKIFY_OPTS,
-      render: factoryRenderLinkifyWithMention((href) =>
-        renderMatrixMention(
-          mx,
-          room.roomId,
-          href,
-          makeMentionCustomProps(mentionClickHandler),
-          nicknames
-        )
-      ),
+      ...settings,
+      hideThreadChip: true as const,
+      hideMembershipEvents: true,
+      hideNickAvatarEvents: true,
     }),
-    [mx, room, mentionClickHandler, nicknames]
+    [settings]
   );
 
-  const abbrMap = useRoomAbbreviationsContext();
+  const hiddenEvents = settings.hiddenEvents;
+  const hideMemberInReadOnly = settings.hideMemberInReadOnly;
+  const hideReads = settings.hideReads;
 
-  const htmlReactParserOptions = useMemo<HTMLReactParserOptions>(
-    () =>
-      getReactCustomHtmlParser(mx, room.roomId, {
-        linkifyOpts,
-        useAuthentication,
-        handleSpoilerClick: spoilerClickHandler,
-        handleMentionClick: mentionClickHandler,
-        nicknames,
-        replaceTextNode: buildAbbrReplaceTextNode(abbrMap),
-      }),
-    [
-      mx,
-      room,
-      linkifyOpts,
-      spoilerClickHandler,
-      mentionClickHandler,
-      useAuthentication,
-      nicknames,
-      abbrMap,
-    ]
-  );
-
-  // Power levels & permissions
-  const powerLevels = usePowerLevelsContext();
-  const creators = useRoomCreators(room);
-  const permissions = useRoomPermissions(creators, powerLevels);
-  const canRedact = permissions.action('redact', mx.getSafeUserId());
-  const canDeleteOwn = permissions.event(MessageEvent.RoomRedaction, mx.getSafeUserId());
-  const canSendReaction = permissions.event(MessageEvent.Reaction, mx.getSafeUserId());
-  const canPinEvent = permissions.stateEvent(StateEvent.RoomPinnedEvents, mx.getSafeUserId());
+  // Ignored users
+  const ignoredUsersList = useIgnoredUsers();
+  const ignoredUsersSet = useMemo(() => new Set(ignoredUsersList), [ignoredUsersList]);
 
   // Image packs
   const roomToParents = useAtomValue(roomToParentsAtom);
@@ -437,56 +131,191 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
   const setReplyDraft = useSetAtom(roomIdToReplyDraftAtomFamily(threadRootId));
   const replyDraft = useAtomValue(roomIdToReplyDraftAtomFamily(threadRootId));
   const activeReplyId = replyDraft?.eventId;
+  const suppressMark = !replyDraft?.body;
 
   // User profile popup
   const openUserRoomProfile = useOpenUserRoomProfile();
+  const optionalSpace = useSpaceOptionally();
 
-  const rootEvent = room.findEventById(threadRootId);
+  // Shared timeline actions — replaces inline handleUserClick,
+  // handleUsernameClick, handleReplyClick, handleReactionToggle,
+  // handleResend, handleDeleteFailedSend (~65 lines).
+  // handleOpenEvent is caller-specific (ThreadDrawer's scroll architecture).
+  // setOpenThread is a no-op (thread drawer can't open sub-threads).
+  const actions = useTimelineActions({
+    room,
+    mx,
+    editor,
+    nicknames,
+    getGlobalProfile,
+    spaceId: optionalSpace?.roomId,
+    openUserRoomProfile: openUserRoomProfile as unknown as (
+      roomId: string,
+      spaceId: string | undefined,
+      userId: string,
+      pmp: Persona | undefined,
+      rect: DOMRect,
+      undefinedArg?: undefined,
+      options?: unknown
+    ) => void,
+    activeReplyId,
+    activeReplyBody: replyDraft?.body,
+    setReplyDraft: setReplyDraft as unknown as (draft: unknown) => void,
+    threadRootId,
+    openThreadId: threadRootId,
+    setOpenThread: () => {},
+    handleEdit,
+    handleOpenEvent: (id) => {
+      let anchorId = unwrapRelationJumpTarget(room, id);
+      const threadLive = thread?.timelineSet.getLiveTimeline();
+      const threadEvents = threadLive?.getEvents();
+      const rawIndex = threadEvents?.findIndex((e) => e.getId() === anchorId) ?? -1;
+      if (rawIndex >= 0) {
+        const nearest = getProcessedRowIndexForRawTimelineIndex(
+          processedEventsRef.current,
+          rawIndex
+        );
+        if (nearest) {
+          const rowEv = processedEventsRef.current[nearest.rowIndex];
+          if (rowEv) anchorId = rowEv.id;
+        }
+      }
+      const isRoot = anchorId === threadRootId;
+      const isInReplies = processedEventsRef.current.some((e) => e.id === anchorId);
+      if (!isRoot && !isInReplies) return;
+      setJumpToEventId(anchorId);
+      setTimeout(() => setJumpToEventId(undefined), 2500);
+      const el = drawerRef.current;
+      if (el) {
+        const target = el.querySelector(`[data-message-id="${anchorId}"]`);
+        target?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    },
+  });
 
-  // When the drawer is opened with classic sync (no server-side thread support),
-  // room.createThread() may have been called with empty initialEvents so
-  // thread.events only has the root.  Backfill events from the main room
-  // timeline so the authoritative source is populated for subsequent renders.
-  //
-  // IMPORTANT: skip this backfill when server-side thread support is active
-  // (initialEventsFetched starts false).  In that case the SDK will call
-  // updateThreadMetadata() → resetLiveTimeline() + paginateEventTimeline()
-  // automatically.  Calling thread.addEvents() ourselves first would trigger
-  // that same cascade prematurely and cause a flood of
-  // "EventTimelineSet.addEventToTimeline: Ignoring event=…" warnings because
-  // canContain() fails while the timeline is in the middle of being reset and
-  // repopulated.
+  // Thread timeline data for useProcessedTimeline
+  const thread = room.getThread(threadRootId);
+  const threadTimeline = thread?.timelineSet.getLiveTimeline();
+
+  // Prefer the event from the main timeline (already indexed), but fall back
+  // to thread.rootEvent — populated from bundled /threads server data even when
+  // the root is outside the currently-loaded timeline window.
+  const rootEvent = room.findEventById(threadRootId) ?? thread?.rootEvent;
+  const totalEvents = threadTimeline?.getEvents().length ?? 0;
+  const linkedTimelines = useMemo(() => {
+    void totalEvents;
+    return threadTimeline ? [threadTimeline] : [];
+  }, [threadTimeline, totalEvents]);
+  const items = useMemo(() => Array.from({ length: totalEvents }, (_, i) => i), [totalEvents]);
+
+  const processedEvents = useProcessedTimeline({
+    items,
+    linkedTimelines,
+    skipThreadFilter: true,
+    ignoredUsersSet,
+    hiddenEvents,
+    mxUserId: mx.getUserId(),
+    readUptoEventId: undefined,
+    hideMembershipEvents: true,
+    hideNickAvatarEvents: true,
+    isReadOnly,
+    hideMemberInReadOnly,
+  });
+
+  // When the thread's own timeline is empty (server-side threads not yet fetched,
+  // or classic sync before backfill completes), fall back to scanning the main
+  // room timeline directly so replies are shown immediately.
+  const displayReplies = useMemo((): ProcessedEvent[] => {
+    // `forceUpdateCounter` is a cache-busting key for thread/timeline updates.
+    void forceUpdateCounter;
+    const filtered = processedEvents.filter((e) => e.id !== threadRootId);
+    if (filtered.length > 0) return filtered;
+    const timelineSet = thread?.timelineSet ?? room.getUnfilteredTimelineSet();
+    return getThreadReplyEvents(room, threadRootId).map((ev, idx) => ({
+      id: ev.getId() ?? `thread-reply-${idx}`,
+      itemIndex: idx,
+      mEvent: ev,
+      isRedacted: ev.isRedacted(),
+      timelineSet,
+      eventSender: ev.getSender() ?? null,
+      collapsed: false,
+      willRenderNewDivider: false,
+      willRenderDayDivider: false,
+      editId: getEditedEvent(ev.getId() ?? '', ev, timelineSet)?.getId(),
+      reactionsKey:
+        getEventReactions(timelineSet, ev.getId() ?? '')
+          ?.getSortedAnnotationsByKey()
+          ?.map((r) => `${r[0]}:${r[1].size}`)
+          .join(',') ?? '',
+      content: ev.getContent(),
+      sendStatus: ev.getAssociatedStatus(),
+    }));
+    // forceUpdateCounter makes this recompute whenever events arrive
+  }, [room, threadRootId, thread, processedEvents, forceUpdateCounter]);
+
+  processedEventsRef.current = displayReplies;
+
+  const processedReplies = displayReplies;
+
+  // Ensure the Thread object exists and has its reply events loaded.
   useEffect(() => {
-    const thread = room.getThread(threadRootId);
-    if (!thread) return;
-    // initialEventsFetched === false  ↔  Thread.hasServerSideSupport is set.
-    // The SDK handles initialization itself; our manual backfill must not run.
-    if (!thread.initialEventsFetched) return;
-    const hasRepliesInThread = thread.events.some(
-      (ev) => ev.getId() !== threadRootId && !reactionOrEditEvent(ev)
-    );
-    if (hasRepliesInThread) return; // already populated, nothing to do
-
-    const liveEvents = room
-      .getUnfilteredTimelineSet()
-      .getLiveTimeline()
-      .getEvents()
-      .filter(
-        (ev) =>
-          ev.threadRootId === threadRootId &&
-          ev.getId() !== threadRootId &&
-          !reactionOrEditEvent(ev)
-      );
-    if (liveEvents.length > 0) {
-      thread.addEvents(liveEvents, false);
+    // Case A: create thread shell; SDK handles the rest asynchronously.
+    if (!room.getThread(threadRootId)) {
+      const localRoot = room.findEventById(threadRootId);
+      if (localRoot) {
+        room.createThread(threadRootId, localRoot, [], false);
+      } else {
+        // Root not in local timeline — fetch it from the server without
+        // touching the main timeline (no TimelineRefresh side-effect).
+        mx.fetchRoomEvent(room.roomId, threadRootId)
+          .then((rawEvt) => {
+            if (room.getThread(threadRootId)) return; // created concurrently
+            room.createThread(threadRootId, new MatrixEvent(rawEvt as IEvent), [], false);
+          })
+          .catch(() => {});
+      }
     }
-  }, [room, threadRootId]);
+
+    const currThread = room.getThread(threadRootId);
+    // Case B: SDK is actively initialising — don't interfere.
+    if (!currThread || !currThread.initialEventsFetched) return;
+
+    // Case C: SDK is done (or classic sync). Backfill from live timeline if
+    // thread.events is still empty (classic sync path; server-side was already
+    // populated by paginateEventTimeline inside updateThreadMetadata).
+    const hasRepliesInThread = currThread.events.some(
+      (ev) =>
+        ev.getId() !== threadRootId &&
+        !reactionOrEditEvent(ev) &&
+        isThreadRelationEvent(ev, threadRootId)
+    );
+    if (hasRepliesInThread) return;
+
+    const liveEvents = getThreadReplyEvents(room, threadRootId);
+    if (liveEvents.length > 0) {
+      // thread.addEvents() is typed as void but is internally async; schedule
+      // forceUpdate in a microtask so the timeline has been updated first.
+      currThread.addEvents(liveEvents, false);
+      Promise.resolve().then(() => forceUpdate((n) => n + 1));
+      return;
+    }
+
+    if (serverFetchAttemptedRef.current === threadRootId) return;
+    serverFetchAttemptedRef.current = threadRootId;
+
+    mx.paginateEventTimeline(currThread.timelineSet.getLiveTimeline(), { backwards: true })
+      .then(() => forceUpdate((n) => n + 1))
+      .catch(() => {});
+    // forceUpdateCounter must be in deps so this effect re-runs after
+    // ThreadEvent.Update fires (which flips initialEventsFetched from false to
+    // true).
+  }, [mx, room, threadRootId, forceUpdate, forceUpdateCounter]);
 
   // Re-render when new thread events arrive (including reactions via ThreadEvent.Update).
   useEffect(() => {
     const isEventInThread = (mEvent: MatrixEvent): boolean => {
       // Direct thread message or the root itself
-      if (mEvent.threadRootId === threadRootId || mEvent.getId() === threadRootId) {
+      if (mEvent.getId() === threadRootId || isThreadRelationEvent(mEvent, threadRootId)) {
         return true;
       }
 
@@ -498,7 +327,8 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
           const targetEvent = room.findEventById(targetEventId);
           if (
             targetEvent &&
-            (targetEvent.threadRootId === threadRootId || targetEvent.getId() === threadRootId)
+            (targetEvent.getId() === threadRootId ||
+              isThreadRelationEvent(targetEvent, threadRootId))
           ) {
             return true;
           }
@@ -519,26 +349,69 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
         forceUpdate((n) => n + 1);
       }
     };
+    const onDecrypted = (mEvent: MatrixEvent) => {
+      if (isEventInThread(mEvent)) {
+        const currThread = room.getThread(threadRootId);
+        if (currThread && !currThread.events.includes(mEvent)) {
+          currThread.addEvents([mEvent], false);
+        }
+        forceUpdate((n) => n + 1);
+      }
+    };
     const onThreadUpdate = () => forceUpdate((n) => n + 1);
-    mx.on(RoomEvent.Timeline, onTimeline as any);
-    room.on(RoomEvent.Redaction, onRedaction as any);
-    room.on(ThreadEvent.Update, onThreadUpdate as any);
-    room.on(ThreadEvent.NewReply, onThreadUpdate as any);
+    mx.on(RoomEvent.Timeline, onTimeline);
+    room.on(RoomEvent.Redaction, onRedaction);
+    room.on(ThreadEvent.Update, onThreadUpdate);
+    room.on(ThreadEvent.NewReply, onThreadUpdate);
+    mx.on(MatrixEventEvent.Decrypted, onDecrypted);
     return () => {
-      mx.off(RoomEvent.Timeline, onTimeline as any);
-      room.removeListener(RoomEvent.Redaction, onRedaction as any);
-      room.removeListener(ThreadEvent.Update, onThreadUpdate as any);
-      room.removeListener(ThreadEvent.NewReply, onThreadUpdate as any);
+      mx.off(RoomEvent.Timeline, onTimeline);
+      room.removeListener(RoomEvent.Redaction, onRedaction);
+      room.removeListener(ThreadEvent.Update, onThreadUpdate);
+      room.removeListener(ThreadEvent.NewReply, onThreadUpdate);
+      mx.removeListener(MatrixEventEvent.Decrypted, onDecrypted);
     };
   }, [mx, room, threadRootId]);
 
+  // Retry decryption for thread root events that failed because they were fetched before keys arrived
+  useEffect(() => {
+    if (!rootEvent?.isEncrypted() || !rootEvent.isDecryptionFailure()) return undefined;
+    const crypto = mx.getCrypto();
+    if (!crypto) return undefined;
+
+    const retryDecrypt = async () => {
+      try {
+        await rootEvent.attemptDecryption(crypto as CryptoBackend);
+        if (!rootEvent.isDecryptionFailure()) forceUpdate((n) => n + 1);
+      } catch {
+        // ignore
+      }
+    };
+
+    // Piggyback on other decryptions as a proxy signal for key arrival
+    const sentinels = room
+      .getLiveTimeline()
+      .getEvents()
+      .slice(-50)
+      .filter((e) => e.isEncrypted());
+    sentinels.forEach((e) => e.on(MatrixEventEvent.Decrypted, retryDecrypt));
+
+    // Attempt immediately in case keys arrived since the initial failure
+    retryDecrypt();
+
+    return () => {
+      sentinels.forEach((e) => e.off(MatrixEventEvent.Decrypted, retryDecrypt));
+    };
+  }, [rootEvent, room, mx]);
+
   // Mark thread as read when viewing it
   useEffect(() => {
+    if (isInactivePanel) return; // Don't send read receipt while room is behind the list
     const markThreadAsRead = async () => {
-      const thread = room.getThread(threadRootId);
-      if (!thread) return;
+      const currentThread = room.getThread(threadRootId);
+      if (!currentThread) return;
 
-      const events = thread.events || [];
+      const events = currentThread.events || [];
       if (events.length === 0) return;
 
       const lastEvent = events[events.length - 1];
@@ -547,7 +420,7 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
       const userId = mx.getUserId();
       if (!userId) return;
 
-      const readUpToId = thread.getEventReadUpTo(userId, false);
+      const readUpToId = currentThread.getEventReadUpTo(userId, false);
       const lastEventId = lastEvent.getId();
 
       // Only send receipt if we haven't already read up to the last event
@@ -555,7 +428,6 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
         try {
           await mx.sendReadReceipt(lastEvent, ReceiptType.Read);
         } catch (err) {
-          // eslint-disable-next-line no-console
           console.warn('Failed to send thread read receipt:', err);
         }
       }
@@ -563,212 +435,194 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
 
     // Mark as read when opened and when new messages arrive
     markThreadAsRead();
-  }, [mx, room, threadRootId, forceUpdate]);
+  }, [mx, room, threadRootId, forceUpdateCounter, isInactivePanel]);
 
   const replyEvents = getThreadReplyEvents(room, threadRootId);
+  const isThreadLoading = !!thread && !thread.initialEventsFetched && replyEvents.length === 0;
 
-  replyEventsRef.current = replyEvents;
+  const hasOlderReplies =
+    canPageBack &&
+    !!thread?.initialEventsFetched &&
+    thread?.timelineSet.getLiveTimeline().getPaginationToken(Direction.Backward) != null;
 
-  // Auto-scroll to bottom when event count grows (if the user is near the bottom).
+  // Keep a ref so the scroll handler always reads the latest value without deps.
+  const hasOlderRepliesRef = useRef(hasOlderReplies);
+  hasOlderRepliesRef.current = hasOlderReplies;
+
+  const loadOlderReplies = useCallback(() => {
+    const t = room.getThread(threadRootId);
+    if (!t || !t.initialEventsFetched || paginatingOlderRef.current) return;
+    paginatingOlderRef.current = true;
+    setLoadingOlderReplies(true);
+    mx.paginateEventTimeline(t.timelineSet.getLiveTimeline(), { backwards: true })
+      .then((hasMore) => {
+        paginatingOlderRef.current = false;
+        if (!hasMore) setCanPageBack(false);
+        setLoadingOlderReplies(false);
+        forceUpdate((n) => n + 1);
+      })
+      .catch(() => {
+        paginatingOlderRef.current = false;
+        setLoadingOlderReplies(false);
+      });
+  }, [mx, room, threadRootId, forceUpdate]);
+
+  const loadOlderRepliesRef = useRef(loadOlderReplies);
+  loadOlderRepliesRef.current = loadOlderReplies;
+
+  useEffect(() => {
+    setCanPageBack(true);
+    autoFillInProgressRef.current = false;
+  }, [threadRootId]);
+
+  const handleRepliesScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollTop < 200 && hasOlderRepliesRef.current && !paginatingOlderRef.current) {
+      loadOlderRepliesRef.current();
+    }
+  }, []);
+
+  // Auto-scroll to bottom when event count grows.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    if (prevReplyCountRef.current === 0 || isAtBottom) {
+    if (prevReplyCountRef.current === 0 || isAtBottom || autoFillInProgressRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-    prevReplyCountRef.current = replyEvents.length;
-  }, [replyEvents.length]);
+    prevReplyCountRef.current = processedReplies.length;
+  }, [processedReplies.length]);
 
-  const handleUserClick: MouseEventHandler<HTMLButtonElement> = useCallback(
-    (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      const userId = evt.currentTarget.getAttribute('data-user-id');
-      if (!userId) return;
-      openUserRoomProfile(
-        room.roomId,
-        undefined,
-        userId,
-        evt.currentTarget.getBoundingClientRect()
+  // Auto-fill viewport: paginate backwards until content overflows the scroll
+  // container, then stop.  The scroll handler (handleRepliesScroll) loads more
+  // when the user scrolls back up past the top threshold.
+  useEffect(() => {
+    if (paginatingOlderRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (!hasOlderReplies) {
+      autoFillInProgressRef.current = false;
+      return;
+    }
+    if (el.scrollHeight <= el.clientHeight) {
+      // Content doesn't yet fill the viewport — paginate one more page.
+      autoFillInProgressRef.current = true;
+      loadOlderRepliesRef.current();
+    } else {
+      // Content now overflows — fill is complete.
+      autoFillInProgressRef.current = false;
+    }
+  }, [processedReplies.length, hasOlderReplies]);
+
+  const handleEditLastMessage = useCallback(() => {
+    const userId = mx.getUserId();
+    const ownReply = [...processedEventsRef.current]
+      .toReversed()
+      .find(
+        (e) =>
+          e.id !== threadRootId &&
+          e.mEvent.getSender() === userId &&
+          !e.mEvent.isRedacted() &&
+          !reactionOrEditEvent(e.mEvent)
       );
-    },
-    [room, openUserRoomProfile]
-  );
-
-  const handleUsernameClick: MouseEventHandler<HTMLButtonElement> = useCallback(
-    (evt) => {
-      evt.preventDefault();
-      const userId = evt.currentTarget.getAttribute('data-user-id');
-      if (!userId) return;
-      const localNicknames = undefined; // will be resolved via getMemberDisplayName in editor
-      const name =
-        getMemberDisplayName(room, userId, localNicknames) ?? getMxIdLocalPart(userId) ?? userId;
-      editor.insertNode(
-        createMentionElement(
-          userId,
-          name.startsWith('@') ? name : `@${name}`,
-          userId === mx.getUserId()
-        )
-      );
-      ReactEditor.focus(editor);
-      moveCursor(editor);
-    },
-    [mx, room, editor]
-  );
-
-  const handleReplyClick: MouseEventHandler<HTMLButtonElement> = useCallback(
-    (evt) => {
-      const replyId = evt.currentTarget.getAttribute('data-event-id');
-      if (!replyId) {
-        // In thread mode, resetting means going back to base thread draft
-        setReplyDraft({
-          userId: mx.getUserId() ?? '',
-          eventId: threadRootId,
-          body: '',
-          relation: { rel_type: RelationType.Thread, event_id: threadRootId },
-        });
-        return;
-      }
-      const replyEvt = room.findEventById(replyId);
-      if (!replyEvt) return;
-      const editedReply = getEditedEvent(replyId, replyEvt, room.getUnfilteredTimelineSet());
-      const content = editedReply?.getContent()['m.new_content'] ?? replyEvt.getContent();
-      const { body, formatted_body: formattedBody } = content;
-      const senderId = replyEvt.getSender();
-      if (senderId) {
-        const draft: IReplyDraft = {
-          userId: senderId,
-          eventId: replyId,
-          body: typeof body === 'string' ? body : '',
-          formattedBody,
-          relation: { rel_type: RelationType.Thread, event_id: threadRootId },
-        };
-        // Only toggle off if we're actively replying to this event (non-empty body distinguishes
-        // a real reply draft from the seeded base-thread draft, which has body: '').
-        if (activeReplyId === replyId && replyDraft?.body) {
-          // Toggle off — reset to base thread draft
-          setReplyDraft({
-            userId: mx.getUserId() ?? '',
-            eventId: threadRootId,
-            body: '',
-            relation: { rel_type: RelationType.Thread, event_id: threadRootId },
-          });
-        } else {
-          setReplyDraft(draft);
-        }
-      }
-    },
-    [mx, room, setReplyDraft, activeReplyId, threadRootId, replyDraft]
-  );
-
-  const handleReactionToggle = useCallback(
-    (targetEventId: string, key: string, shortcode?: string) => {
-      const threadTimelineSet = room.getThread(threadRootId)?.timelineSet;
-      toggleReaction(mx, room, targetEventId, key, shortcode, threadTimelineSet);
-    },
-    [mx, room, threadRootId]
-  );
-
-  const handleEdit = useCallback(
-    (evtId?: string) => {
-      setEditId(evtId);
-      if (!evtId) {
-        ReactEditor.focus(editor);
-        moveCursor(editor);
-      }
-    },
-    [editor]
-  );
-
-  const handleResend = useCallback(
-    (event: MatrixEvent) => {
-      mx.resendEvent(event, room);
-    },
-    [mx, room]
-  );
-
-  const handleDeleteFailedSend = useCallback(
-    (event: MatrixEvent) => {
-      mx.cancelPendingEvent(event);
-    },
-    [mx]
-  );
-
-  const handleOpenReply: MouseEventHandler<HTMLButtonElement> = useCallback(
-    (evt) => {
-      const targetId = evt.currentTarget.getAttribute('data-event-id');
-      if (!targetId) return;
-      const isRoot = targetId === threadRootId;
-      const isInReplies = replyEventsRef.current.some((e) => e.getId() === targetId);
-      if (!isRoot && !isInReplies) return;
-      setJumpToEventId(targetId);
-      setTimeout(() => setJumpToEventId(undefined), 2500);
+    const ownId = ownReply?.id;
+    if (ownId) {
+      handleEdit(ownId);
       const el = drawerRef.current;
       if (el) {
-        const target = el.querySelector(`[data-message-id="${targetId}"]`);
-        target?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        el.querySelector(`[data-message-id="${ownId}"]`)?.scrollIntoView({
+          block: 'nearest',
+          behavior: 'smooth',
+        });
       }
-    },
-    [threadRootId]
-  );
+    }
+  }, [mx, threadRootId, handleEdit]);
 
-  const sharedMessageProps = {
+  const focusItem = jumpToEventId
+    ? { eventId: jumpToEventId, highlight: true, scrollTo: false as const }
+    : undefined;
+
+  const renderMatrixEvent = useTimelineEventRenderer({
     room,
-    threadRootId,
-    editId,
-    onEditId: handleEdit,
-    messageLayout,
-    messageSpacing,
-    canDelete: canRedact || canDeleteOwn,
-    canSendReaction,
-    canPinEvent,
-    imagePackRooms,
-    activeReplyId,
-    hour24Clock,
-    dateFormatString,
-    onUserClick: handleUserClick,
-    onUsernameClick: handleUsernameClick,
-    onReplyClick: handleReplyClick,
-    onReactionToggle: handleReactionToggle,
-    onResend: handleResend,
-    onDeleteFailedSend: handleDeleteFailedSend,
+    mx,
     pushProcessor,
-    linkifyOpts,
-    htmlReactParserOptions,
-    showHideReads: hideReads,
-    showDeveloperTools,
-    onReferenceClick: handleOpenReply,
-    jumpToEventId,
-  };
+    nicknames,
+    getProfile: getGlobalProfile,
+    imagePackRooms,
+    settings: threadSettings,
+    state: { focusItem, editId, activeReplyId, openThreadId: threadRootId, suppressMark },
+    permissions: {
+      canRedact,
+      canDeleteOwn,
+      canSendReaction,
+      canPinEvent,
+    },
+    callbacks: {
+      onUserClick: actions.handleUserClick,
+      onUsernameClick: actions.handleUsernameClick,
+      onReplyClick: actions.handleReplyClick,
+      onReactionToggle: actions.handleReactionToggle,
+      onEditId: actions.handleEdit,
+      onResend: actions.handleResend,
+      onDeleteFailedSend: actions.handleDeleteFailedSend,
+      setOpenThread: () => {},
+      handleOpenReply: actions.handleOpenReply,
+    },
+    utils: { htmlReactParserOptions, linkifyOpts, getMemberPowerTag, parseMemberEvent },
+  });
 
   // Latest thread event for the following indicator (latest reply, or root if no replies)
   const threadParticipantIds = new Set(
-    [rootEvent, ...replyEvents].map((ev) => ev?.getSender()).filter(Boolean) as string[]
+    processedEvents.map((e) => e.mEvent.getSender()).filter(Boolean) as string[]
   );
-  const latestThreadEventId = (
-    replyEvents.length > 0 ? replyEvents[replyEvents.length - 1] : rootEvent
-  )?.getId();
+  const latestThreadEventId = processedEvents.at(-1)?.id ?? rootEvent?.getId();
 
+  const [threadSidebarWidth, setThreadSidebarWidth] = useSetting(
+    settingsAtom,
+    'threadSidebarWidth'
+  );
+  const [curWidth, setCurWidth] = useState(threadSidebarWidth);
+  useEffect(() => {
+    setCurWidth(threadSidebarWidth);
+  }, [threadSidebarWidth]);
+
+  const [threadRootHeight, setThreadRootHeight] = useSetting(settingsAtom, 'threadRootHeight');
+  const [curHeight, setCurHeight] = useState(threadRootHeight);
+  useEffect(() => {
+    setCurHeight(threadRootHeight);
+  }, [threadRootHeight]);
   return (
     <Box
       ref={drawerRef}
       className={overlay ? css.ThreadDrawerOverlay : css.ThreadDrawer}
       direction="Column"
       shrink="No"
+      style={{
+        position: overlay ? 'absolute' : 'relative',
+        isolation: 'isolate',
+        width: overlay ? '100%' : toRem(curWidth),
+      }}
     >
+      {!isMobileOrTablet() && (
+        <SidebarResizer
+          setCurWidth={setCurWidth}
+          sidebarWidth={threadSidebarWidth}
+          setSidebarWidth={setThreadSidebarWidth}
+          minValue={250}
+          maxValue={600}
+          isReversed
+        />
+      )}
       {/* Header */}
       <Header className={css.ThreadDrawerHeader} variant="Background" size="600">
         <Box grow="Yes" alignItems="Center" gap="200">
-          <Icon size="200" src={Icons.Thread} />
+          {composerIcon(Chats)}
           <Text size="H4" truncate>
             Thread
           </Text>
         </Box>
         <Box alignItems="Center" gap="200" shrink="No">
-          <Text size="T300" priority="300" truncate>
-            # {room.name}
-          </Text>
           <IconButton
             onClick={onClose}
             variant="SurfaceVariant"
@@ -776,36 +630,55 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
             radii="300"
             aria-label="Close thread"
           >
-            <Icon size="200" src={Icons.Cross} />
+            {composerIcon(X)}
           </IconButton>
         </Box>
       </Header>
 
       {/* Thread root message */}
       {rootEvent && (
-        <Scroll
-          variant="Background"
-          visibility="Hover"
-          direction="Vertical"
-          hideTrack
-          style={{
-            maxHeight: '200px',
-            height: 'fit-content',
-            flexShrink: 0,
-          }}
-        >
-          <Box
-            className={css.messageList}
-            direction="Column"
-            style={{
-              padding: `${config.space.S200} 0 ${config.space.S100} 0`,
-            }}
-          >
-            <ThreadMessage {...sharedMessageProps} mEvent={rootEvent} />
+        <Box className={css.threadRootShell}>
+          <Box className={css.threadRootScrollShadow}>
+            <Scroll
+              variant="Background"
+              visibility="Hover"
+              direction="Vertical"
+              size="300"
+              hideTrack
+              style={{
+                height: toRem(curHeight),
+                flexShrink: 0,
+              }}
+            >
+              <Box
+                className={css.messageList}
+                direction="Column"
+                style={{
+                  padding: `${config.space.S200} 0 ${config.space.S100} 0`,
+                }}
+              >
+                {renderMatrixEvent(
+                  rootEvent.getType(),
+                  typeof rootEvent.getStateKey() === 'string',
+                  rootEvent.getId()!,
+                  rootEvent,
+                  processedEvents.find((e) => e.id === threadRootId)?.itemIndex ?? 0,
+                  thread?.timelineSet ?? room.getUnfilteredTimelineSet(),
+                  false
+                )}
+              </Box>
+            </Scroll>
           </Box>
-        </Scroll>
+          <SidebarResizer
+            setCurWidth={setCurHeight}
+            sidebarWidth={threadRootHeight}
+            setSidebarWidth={setThreadRootHeight}
+            minValue={60}
+            maxValue={700}
+            topSided
+          />
+        </Box>
       )}
-
       {/* Replies */}
       <Box className={css.ThreadDrawerContent} grow="Yes" direction="Column">
         <Scroll
@@ -813,58 +686,77 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
           variant="Background"
           visibility="Hover"
           direction="Vertical"
-          hideTrack
+          size="300"
+          onScroll={handleRepliesScroll}
           style={{ flexGrow: 1 }}
         >
-          {replyEvents.length === 0 ? (
-            <Box
-              direction="Column"
-              alignItems="Center"
-              justifyContent="Center"
-              style={{ padding: config.space.S400, gap: config.space.S200 }}
-            >
-              <Icon size="400" src={Icons.Thread} />
-              <Text size="T300" align="Center">
-                No replies yet. Start the thread below!
-              </Text>
-            </Box>
-          ) : (
-            <>
-              {/* Reply count label inside scroll area */}
-              <Box
-                style={{
-                  padding: `${config.space.S200} ${config.space.S400}`,
-                  flexShrink: 0,
-                }}
-              >
-                <Text size="T300" priority="300">
-                  {replyEvents.length} {replyEvents.length === 1 ? 'reply' : 'replies'}
-                </Text>
-              </Box>
-              <Box
-                className={css.messageList}
-                direction="Column"
-                style={{ padding: `0 0 ${config.space.S600} 0` }}
-              >
-                {replyEvents.map((mEvent, i) => {
-                  const prevEvent = i > 0 ? replyEvents[i - 1] : undefined;
-                  const collapse =
-                    prevEvent !== undefined &&
-                    prevEvent.getSender() === mEvent.getSender() &&
-                    prevEvent.getType() === mEvent.getType() &&
-                    minuteDifference(prevEvent.getTs(), mEvent.getTs()) < 2;
-                  return (
-                    <ThreadMessage
-                      key={mEvent.getId()}
-                      {...sharedMessageProps}
-                      mEvent={mEvent}
-                      collapse={collapse}
-                    />
-                  );
-                })}
-              </Box>
-            </>
-          )}
+          {(() => {
+            if (isThreadLoading)
+              return (
+                <Box
+                  direction="Column"
+                  alignItems="Center"
+                  justifyContent="Center"
+                  style={{ padding: config.space.S400 }}
+                >
+                  <Spinner variant="Secondary" size="400" />
+                </Box>
+              );
+            if (processedReplies.length === 0)
+              return (
+                <Box
+                  direction="Column"
+                  alignItems="Center"
+                  justifyContent="Center"
+                  style={{ padding: config.space.S400, gap: config.space.S200 }}
+                >
+                  {composerIcon(Chats, { style: { opacity: 0.6 } })}
+                  <Text size="T300" align="Center">
+                    No replies yet. Start the thread below!
+                  </Text>
+                </Box>
+              );
+            return (
+              <>
+                {loadingOlderReplies && (
+                  <Box
+                    justifyContent="Center"
+                    style={{ padding: config.space.S300, flexShrink: 0 }}
+                  >
+                    <Spinner variant="Secondary" size="200" />
+                  </Box>
+                )}
+                {/* Reply count label inside scroll area */}
+                <Box
+                  style={{
+                    padding: `${config.space.S200} ${config.space.S400}`,
+                    flexShrink: 0,
+                  }}
+                >
+                  <Text size="T300" priority="300">
+                    {processedReplies.length} {processedReplies.length === 1 ? 'reply' : 'replies'}
+                  </Text>
+                </Box>
+                <Box
+                  className={css.messageList}
+                  direction="Column"
+                  style={{ padding: `0 0 ${config.space.S600} 0` }}
+                >
+                  {processedReplies.map((e) =>
+                    renderMatrixEvent(
+                      e.mEvent.getType(),
+                      typeof e.mEvent.getStateKey() === 'string',
+                      e.id,
+                      e.mEvent,
+                      e.itemIndex,
+                      e.timelineSet,
+                      e.collapsed
+                    )
+                  )}
+                </Box>
+              </>
+            );
+          })()}
         </Scroll>
       </Box>
 
@@ -878,6 +770,7 @@ export function ThreadDrawer({ room, threadRootId, onClose, overlay }: ThreadDra
             threadRootId={threadRootId}
             editor={editor}
             fileDropContainerRef={drawerRef}
+            onEditLastMessage={handleEditLastMessage}
           />
         </div>
         {hideReads ? (

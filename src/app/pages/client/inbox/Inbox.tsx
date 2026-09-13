@@ -1,17 +1,28 @@
-import { Avatar, Box, Icon, Icons, Text } from 'folds';
-import { useAtomValue } from 'jotai';
+import { Avatar, Box, Text } from 'folds';
+import { ChatCircleDots, EnvelopeSimple, Tray, sizedIcon } from '$components/icons/phosphor';
 import { NavCategory, NavItem, NavItemContent, NavLink } from '$components/nav';
-import { getInboxInvitesPath, getInboxNotificationsPath } from '$pages/pathUtils';
-import { useInboxInvitesSelected, useInboxNotificationsSelected } from '$hooks/router/useInbox';
+import {
+  getInboxBookmarksPath,
+  getInboxInvitesPath,
+  getInboxNotificationsPath,
+} from '$pages/pathUtils';
+import {
+  useInboxBookmarksSelected,
+  useInboxInvitesSelected,
+  useInboxNotificationsSelected,
+} from '$hooks/router/useRouteSelected';
 import { UnreadBadge } from '$components/unread-badge';
-import { allInvitesAtom } from '$state/room-list/inviteList';
 import { useNavToActivePathMapper } from '$hooks/useNavToActivePathMapper';
-import { PageNav, PageNavContent, PageNavHeader } from '$components/page';
+import { PageNavContent, PageNavHeader } from '$components/page';
+import { PageNavShell } from '$components/page/PageNavShell';
+import { useSidebarWidth } from '$hooks/useSidebarWidth';
+import { useInviteCount } from '$hooks/useInviteCount';
+import { useInboxNotificationCount } from '$hooks/useInboxNotificationCount';
+import { BookmarkIcon } from '@phosphor-icons/react';
 
-function InvitesNavItem() {
+function InvitesNavItem({ hideText }: { hideText?: boolean }) {
   const invitesSelected = useInboxInvitesSelected();
-  const allInvites = useAtomValue(allInvitesAtom);
-  const inviteCount = allInvites.length;
+  const inviteCount = useInviteCount();
 
   return (
     <NavItem
@@ -23,15 +34,57 @@ function InvitesNavItem() {
       <NavLink to={getInboxInvitesPath()}>
         <NavItemContent>
           <Box as="span" grow="Yes" alignItems="Center" gap="200">
-            <Avatar size="200" radii="400">
-              <Icon src={Icons.Mail} size="100" filled={invitesSelected} />
+            <Avatar
+              size="200"
+              radii="400"
+              style={hideText ? { width: '100%', padding: '0' } : { height: '100%' }}
+            >
+              {sizedIcon(EnvelopeSimple, '100', { filled: invitesSelected })}
             </Avatar>
-            <Box as="span" grow="Yes">
-              <Text as="span" size="Inherit" truncate>
-                Invites
-              </Text>
-            </Box>
+            {!hideText && (
+              <Box as="span" grow="Yes">
+                <Text as="span" size="Inherit" truncate>
+                  Invites
+                </Text>
+              </Box>
+            )}
             {inviteCount > 0 && <UnreadBadge highlight count={inviteCount} />}
+          </Box>
+        </NavItemContent>
+      </NavLink>
+    </NavItem>
+  );
+}
+
+function NotificationsNavItem({ hideText }: { hideText?: boolean }) {
+  const notificationsSelected = useInboxNotificationsSelected();
+  const notificationCount = useInboxNotificationCount();
+
+  return (
+    <NavItem
+      variant="Background"
+      radii="400"
+      highlight={notificationCount > 0}
+      aria-selected={notificationsSelected}
+    >
+      <NavLink to={getInboxNotificationsPath()}>
+        <NavItemContent>
+          <Box as="span" grow="Yes" alignItems="Center" gap="200">
+            <Avatar
+              size="200"
+              radii="400"
+              style={hideText ? { width: '100%', padding: '0' } : { height: '100%' }}
+            >
+              {sizedIcon(ChatCircleDots, '100', { filled: notificationsSelected })}
+            </Avatar>
+            {!hideText && (
+              <Box as="span" grow="Yes">
+                <Text as="span" size="Inherit" truncate>
+                  Notifications
+                </Text>
+              </Box>
+            )}
+            {notificationCount > 0 && <UnreadBadge highlight count={notificationCount} />}
           </Box>
         </NavItemContent>
       </NavLink>
@@ -41,43 +94,75 @@ function InvitesNavItem() {
 
 export function Inbox() {
   useNavToActivePathMapper('inbox');
-  const notificationsSelected = useInboxNotificationsSelected();
+  const bookmarksSelected = useInboxBookmarksSelected();
+
+  const {
+    curWidth,
+    setCurWidth,
+    roomSidebarWidth,
+    setRoomSidebarWidth,
+    setIsResizingSidebar,
+    isMobile,
+    hideText,
+    oldSidebar,
+  } = useSidebarWidth();
 
   return (
-    <PageNav>
-      <PageNavHeader>
-        <Box grow="Yes" gap="300">
-          <Box grow="Yes">
-            <Text size="H4" truncate>
-              Inbox
-            </Text>
+    <PageNavShell
+      header={
+        <PageNavHeader size="600">
+          <Box grow="Yes" gap="300" justifyContent="Center">
+            {!hideText ? (
+              <Box grow="Yes">
+                <Text
+                  size="H4"
+                  truncate
+                  align={isMobile ? 'Center' : undefined}
+                  style={{ width: '100%' }}
+                >
+                  Inbox
+                </Text>
+              </Box>
+            ) : (
+              sizedIcon(Tray, '200', { filled: true })
+            )}
           </Box>
-        </Box>
-      </PageNavHeader>
-
+        </PageNavHeader>
+      }
+      curWidth={curWidth}
+      setCurWidth={setCurWidth}
+      roomSidebarWidth={roomSidebarWidth}
+      setRoomSidebarWidth={setRoomSidebarWidth}
+      setIsResizingSidebar={setIsResizingSidebar}
+      isMobile={isMobile}
+      oldSidebar={oldSidebar}
+    >
       <PageNavContent>
         <Box direction="Column" gap="300">
           <NavCategory>
-            <NavItem variant="Background" radii="400" aria-selected={notificationsSelected}>
-              <NavLink to={getInboxNotificationsPath()}>
+            <NotificationsNavItem hideText={hideText} />
+            <InvitesNavItem hideText={hideText} />
+            <NavItem variant="Background" radii="400" aria-selected={bookmarksSelected}>
+              <NavLink to={getInboxBookmarksPath()}>
                 <NavItemContent>
                   <Box as="span" grow="Yes" alignItems="Center" gap="200">
                     <Avatar size="200" radii="400">
-                      <Icon src={Icons.MessageUnread} size="100" filled={notificationsSelected} />
+                      {sizedIcon(BookmarkIcon, '100', {
+                        filled: bookmarksSelected,
+                      })}{' '}
                     </Avatar>
                     <Box as="span" grow="Yes">
                       <Text as="span" size="Inherit" truncate>
-                        Notifications
+                        Bookmarks
                       </Text>
                     </Box>
                   </Box>
                 </NavItemContent>
               </NavLink>
             </NavItem>
-            <InvitesNavItem />
           </NavCategory>
         </Box>
       </PageNavContent>
-    </PageNav>
+    </PageNavShell>
   );
 }

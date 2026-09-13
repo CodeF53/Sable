@@ -57,7 +57,7 @@ export class ASCIILexicalTable {
   }
 
   private getWidthToSize(width: number): number {
-    return this.widthToSize[width - 1];
+    return this.widthToSize[width - 1] ?? 0;
   }
 
   first(): string {
@@ -148,56 +148,6 @@ export class ASCIILexicalTable {
       toIndex -= 1;
     }
 
-    return str;
-  }
-
-  previous(str: string): string | undefined {
-    if (!this.has(str)) return undefined;
-    let prev = str;
-    const lastCode = prev.charCodeAt(prev.length - 1);
-    prev = prev.slice(0, prev.length - 1);
-
-    if (lastCode === this.startCode) {
-      if (prev.length === 0) return undefined;
-      return prev;
-    }
-
-    prev += String.fromCharCode(lastCode - 1);
-    while (prev.length < this.maxStrWidth) {
-      prev += String.fromCodePoint(this.endCode);
-    }
-    return prev;
-  }
-
-  next(str: string): string | undefined {
-    if (!this.has(str)) return undefined;
-    let next = str;
-
-    if (next.length < this.maxStrWidth) {
-      next += String.fromCharCode(this.startCode);
-      return next;
-    }
-
-    for (let i = next.length - 1; i >= 0; i -= 1) {
-      const lastCode = next.charCodeAt(i);
-      if (lastCode !== this.endCode) {
-        next = next.slice(0, i) + String.fromCharCode(lastCode + 1);
-        return next;
-      }
-      next = next.slice(0, i);
-    }
-    return undefined;
-  }
-
-  between(a: string, b: string): string | undefined {
-    if (!this.has(a) || !this.has(b)) {
-      return undefined;
-    }
-
-    const centerIndex = Math.floor((this.index(a) + this.index(b)) / 2);
-
-    const str = this.get(centerIndex);
-    if (str === a || str === b) return undefined;
     return str;
   }
 
@@ -355,7 +305,7 @@ export const orderKeys = (
 ): Array<string> | undefined => {
   const newKeys: string[] = [];
 
-  for (let i = 0; i < keys.length; ) {
+  for (let i = 0; i < keys.length;) {
     const key = keys[i];
     const collectedKeys: string[] = [];
     const [nextKeyIndex, nextKey] = findNextFilledKey(i + 1, keys);

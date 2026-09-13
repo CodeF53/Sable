@@ -1,11 +1,22 @@
-import { FormEventHandler, useCallback } from 'react';
-import { Box, Text, Button, Spinner, color } from 'folds';
+import type { FormEventHandler } from 'react';
+import { useCallback } from 'react';
+import { Box, Text } from 'folds';
 import { decodeRecoveryKey, deriveRecoveryKeyFromPassphrase } from '$types/matrix-sdk';
-import { SecretStorageKeyContent, SecretStoragePassphraseContent } from '$types/matrix/accountData';
+import type {
+  SecretStorageKeyContent,
+  SecretStoragePassphraseContent,
+} from '$types/matrix/accountData';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { useMatrixClient } from '$hooks/useMatrixClient';
+import { AsyncError } from '$components/AsyncError';
 import { useAlive } from '$hooks/useAlive';
 import { PasswordInput } from './password-input';
+import { Button } from '$components/button';
+
+export enum SecretStorageKeyMethod {
+  RecoveryPassphrase = 'passphrase',
+  RecoveryKey = 'key',
+}
 
 type SecretStorageRecoveryPassphraseProps = {
   processing?: boolean;
@@ -36,7 +47,7 @@ export function SecretStorageRecoveryPassphrase({
           bits
         );
 
-        const match = await mx.secretStorage.checkKey(decodedRecoveryKey, keyContent as any);
+        const match = await mx.secretStorage.checkKey(decodedRecoveryKey, keyContent as never);
 
         if (!match) {
           throw new Error('Invalid recovery passphrase.');
@@ -63,7 +74,7 @@ export function SecretStorageRecoveryPassphrase({
 
     const { salt, iterations, bits } = passphraseContent;
     submitPassphrase(recoveryPassphrase, salt, iterations, bits).then((decodedRecoveryKey) => {
-      if (alive()) {
+      if (alive() && decodedRecoveryKey instanceof Uint8Array) {
         recoveryPassphraseInput.value = '';
         onDecodedRecoveryKey(decodedRecoveryKey);
       }
@@ -92,8 +103,9 @@ export function SecretStorageRecoveryPassphrase({
             variant="Success"
             size="400"
             radii="300"
-            disabled={loading}
-            before={loading && <Spinner size="200" variant="Success" fill="Solid" />}
+            loading={loading}
+            spinnerSize="200"
+            spinnerVariant="Success"
           >
             <Text as="span" size="B400">
               Verify
@@ -101,12 +113,40 @@ export function SecretStorageRecoveryPassphrase({
           </Button>
         </Box>
       </Box>
-      {driveKeyState.status === AsyncStatus.Error && (
-        <Text size="T200" style={{ color: color.Critical.Main }}>
-          <b>{driveKeyState.error.message}</b>
-        </Text>
-      )}
+      <AsyncError state={driveKeyState} bold />
     </Box>
+  );
+}
+
+type SecretStorageKeyPromptProps = {
+  method: SecretStorageKeyMethod;
+  processing?: boolean;
+  keyContent: SecretStorageKeyContent;
+  onDecodedRecoveryKey: (recoveryKey: Uint8Array) => void;
+};
+export function SecretStorageKeyPrompt({
+  method,
+  processing,
+  keyContent,
+  onDecodedRecoveryKey,
+}: SecretStorageKeyPromptProps) {
+  if (method === SecretStorageKeyMethod.RecoveryPassphrase && keyContent.passphrase) {
+    return (
+      <SecretStorageRecoveryPassphrase
+        processing={processing}
+        keyContent={keyContent}
+        passphraseContent={keyContent.passphrase}
+        onDecodedRecoveryKey={onDecodedRecoveryKey}
+      />
+    );
+  }
+
+  return (
+    <SecretStorageRecoveryKey
+      processing={processing}
+      keyContent={keyContent}
+      onDecodedRecoveryKey={onDecodedRecoveryKey}
+    />
   );
 }
 
@@ -128,7 +168,7 @@ export function SecretStorageRecoveryKey({
       async (recoveryKey) => {
         const decodedRecoveryKey = decodeRecoveryKey(recoveryKey);
 
-        const match = await mx.secretStorage.checkKey(decodedRecoveryKey, keyContent as any);
+        const match = await mx.secretStorage.checkKey(decodedRecoveryKey, keyContent as never);
 
         if (!match) {
           throw new Error('Invalid recovery key.');
@@ -153,7 +193,7 @@ export function SecretStorageRecoveryKey({
     if (!recoveryKey) return;
 
     submitRecoveryKey(recoveryKey).then((decodedRecoveryKey) => {
-      if (alive()) {
+      if (alive() && decodedRecoveryKey instanceof Uint8Array) {
         recoveryKeyInput.value = '';
         onDecodedRecoveryKey(decodedRecoveryKey);
       }
@@ -182,8 +222,9 @@ export function SecretStorageRecoveryKey({
             variant="Success"
             size="400"
             radii="300"
-            disabled={loading}
-            before={loading && <Spinner size="200" variant="Success" fill="Solid" />}
+            loading={loading}
+            spinnerSize="200"
+            spinnerVariant="Success"
           >
             <Text as="span" size="B400">
               Verify
@@ -191,11 +232,7 @@ export function SecretStorageRecoveryKey({
           </Button>
         </Box>
       </Box>
-      {driveKeyState.status === AsyncStatus.Error && (
-        <Text size="T200" style={{ color: color.Critical.Main }}>
-          <b>{driveKeyState.error.message}</b>
-        </Text>
-      )}
+      <AsyncError state={driveKeyState} bold />
     </Box>
   );
 }

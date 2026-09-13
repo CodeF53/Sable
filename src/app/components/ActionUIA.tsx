@@ -1,16 +1,29 @@
-import { ReactNode } from 'react';
-import { AuthDict, AuthType, IAuthData, UIAFlow } from '$types/matrix-sdk';
+import type { ReactNode } from 'react';
+import type { AuthDict, IAuthData, UIAFlow } from '$types/matrix-sdk';
+import { AuthType } from '$types/matrix-sdk';
 import { getUIAFlowForStages } from '$utils/matrix-uia';
 import { useSupportedUIAFlows, useUIACompleted, useUIAFlow } from '$hooks/useUIAFlows';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { UIAFlowOverlay } from './UIAFlowOverlay';
-import { PasswordStage, SSOStage } from './uia-stages';
+import { OAuthStage, PasswordStage, SSOStage } from './uia-stages';
 
-export const SUPPORTED_IN_APP_UIA_STAGES = [AuthType.Password, AuthType.Sso];
+// MSC4312 unstable prefix for m.oauth.
+export const OAUTH_UNSTABLE_STAGE = 'org.matrix.cross_signing_reset';
 
-export const pickUIAFlow = (uiaFlows: UIAFlow[]): UIAFlow | undefined => {
+const SUPPORTED_IN_APP_UIA_STAGES = [
+  AuthType.Password,
+  AuthType.Sso,
+  AuthType.OAuth,
+  OAUTH_UNSTABLE_STAGE,
+];
+
+const pickUIAFlow = (uiaFlows: UIAFlow[]): UIAFlow | undefined => {
   const passwordFlow = getUIAFlowForStages(uiaFlows, [AuthType.Password]);
   if (passwordFlow) return passwordFlow;
+  const oauthFlow =
+    getUIAFlowForStages(uiaFlows, [AuthType.OAuth]) ??
+    getUIAFlowForStages(uiaFlows, [OAUTH_UNSTABLE_STAGE]);
+  if (oauthFlow) return oauthFlow;
   return getUIAFlowForStages(uiaFlows, [AuthType.Sso]);
 };
 
@@ -34,7 +47,7 @@ export function ActionUIA({ authData, ongoingFlow, action, onCancel }: ActionUIA
       stepCount={ongoingFlow.stages.length}
       onCancel={onCancel}
     >
-      {stageToComplete.type === AuthType.Password && (
+      {stageToComplete.type === (AuthType.Password as string) && (
         <PasswordStage
           userId={mx.getUserId()!}
           stageData={stageToComplete}
@@ -42,7 +55,7 @@ export function ActionUIA({ authData, ongoingFlow, action, onCancel }: ActionUIA
           submitAuthDict={action}
         />
       )}
-      {stageToComplete.type === AuthType.Sso && stageToComplete.session && (
+      {stageToComplete.type === (AuthType.Sso as string) && stageToComplete.session && (
         <SSOStage
           ssoRedirectURL={mx.getFallbackAuthUrl(AuthType.Sso, stageToComplete.session)}
           stageData={stageToComplete}
@@ -50,6 +63,11 @@ export function ActionUIA({ authData, ongoingFlow, action, onCancel }: ActionUIA
           submitAuthDict={action}
         />
       )}
+      {(stageToComplete.type === (AuthType.OAuth as string) ||
+        stageToComplete.type === OAUTH_UNSTABLE_STAGE) &&
+        stageToComplete.session && (
+          <OAuthStage stageData={stageToComplete} onCancel={onCancel} submitAuthDict={action} />
+        )}
     </UIAFlowOverlay>
   );
 }
@@ -65,7 +83,7 @@ export function ActionUIAFlowsLoader({
   children,
 }: ActionUIAFlowsLoaderProps) {
   const supportedFlows = useSupportedUIAFlows(authData.flows ?? [], SUPPORTED_IN_APP_UIA_STAGES);
-  const ongoingFlow = supportedFlows.length > 0 ? supportedFlows[0] : undefined;
+  const ongoingFlow = supportedFlows.length > 0 ? pickUIAFlow(supportedFlows) : undefined;
 
   if (!ongoingFlow) return unsupported();
 

@@ -8,15 +8,13 @@
  *   localStorage.removeItem('sable_debug'); location.reload();
  */
 
-export const isDebug = (): boolean =>
-  import.meta.env.DEV || localStorage.getItem('sable_debug') === '1';
+const isDebug = (): boolean => import.meta.env.DEV || localStorage.getItem('sable_debug') === '1';
 
 type LogLevel = 'log' | 'warn' | 'error';
 
 const fmt = (namespace: string, level: LogLevel, ...args: unknown[]): void => {
   if (!isDebug() && level === 'log') return;
   const prefix = `[sable:${namespace}]`;
-  // eslint-disable-next-line no-console
   console[level](prefix, ...args);
 };
 

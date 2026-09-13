@@ -1,4 +1,5 @@
-import { FormEventHandler, useCallback, useState } from 'react';
+import type { FormEventHandler } from 'react';
+import { useCallback, useState } from 'react';
 import {
   Badge,
   Box,
@@ -7,17 +8,15 @@ import {
   Chip,
   color,
   config,
-  Icon,
-  Icons,
   Input,
   Spinner,
   Text,
   toRem,
 } from 'folds';
-import { MatrixError } from '$types/matrix-sdk';
+import { CaretDown, CaretUp, menuIcon } from '$components/icons/phosphor';
+import type { MatrixError } from '$types/matrix-sdk';
 import { SettingTile } from '$components/setting-tile';
-import { SequenceCard } from '$components/sequence-card';
-import { SequenceCardStyle } from '$features/room-settings/styles.css';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { useRoom } from '$hooks/useRoom';
 import {
@@ -30,9 +29,10 @@ import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { CutoutCard } from '$components/cutout-card';
 import { replaceSpaceWithDash } from '$utils/common';
 import { useAlive } from '$hooks/useAlive';
-import { StateEvent } from '$types/matrix/room';
-import { RoomPermissionsAPI } from '$hooks/useRoomPermissions';
-import { getMxIdServer } from '$utils/matrix';
+import { getMxIdServer } from '$utils/mxIdHelper';
+
+import type { RoomPermissionsAPI } from '$hooks/useRoomPermissions';
+import { EventType } from '$types/matrix-sdk';
 
 type RoomPublishedAddressesProps = {
   permissions: RoomPermissionsAPI;
@@ -42,10 +42,7 @@ export function RoomPublishedAddresses({ permissions }: RoomPublishedAddressesPr
   const mx = useMatrixClient();
   const room = useRoom();
 
-  const canEditCanonical = permissions.stateEvent(
-    StateEvent.RoomCanonicalAlias,
-    mx.getSafeUserId()
-  );
+  const canEditCanonical = permissions.stateEvent(EventType.RoomCanonicalAlias, mx.getSafeUserId());
 
   const [canonicalAlias, publishedAliases] = usePublishedAliases(room);
   const setMainAlias = useSetMainAlias(room);
@@ -237,7 +234,8 @@ function LocalAddressesList({
       async (aliases: string[]) => {
         for (let i = 0; i < aliases.length; i += 1) {
           const alias = aliases[i];
-          // eslint-disable-next-line no-await-in-loop
+          if (!alias) continue;
+          // oxlint-disable-next-line no-await-in-loop
           await removeLocalAlias(alias);
         }
       },
@@ -363,10 +361,7 @@ export function RoomLocalAddresses({ permissions }: { permissions: RoomPermissio
   const mx = useMatrixClient();
   const room = useRoom();
 
-  const canEditCanonical = permissions.stateEvent(
-    StateEvent.RoomCanonicalAlias,
-    mx.getSafeUserId()
-  );
+  const canEditCanonical = permissions.stateEvent(EventType.RoomCanonicalAlias, mx.getSafeUserId());
 
   const [expand, setExpand] = useState(false);
 
@@ -391,9 +386,7 @@ export function RoomLocalAddresses({ permissions }: { permissions: RoomPermissio
             fill="Soft"
             outlined
             radii="300"
-            before={
-              <Icon size="100" src={expand ? Icons.ChevronTop : Icons.ChevronBottom} filled />
-            }
+            before={menuIcon(expand ? CaretUp : CaretDown, { weight: 'fill' })}
           >
             <Text as="span" size="B300" truncate>
               {expand ? 'Collapse' : 'Expand'}

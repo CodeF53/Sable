@@ -1,9 +1,10 @@
 import { useCallback, useMemo } from 'react';
-import { Room } from '$types/matrix-sdk';
+import type { Room } from '$types/matrix-sdk';
 import { usePowerLevels } from '$hooks/usePowerLevels';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { ImagePack, PackContent } from '$plugins/custom-emoji';
-import { StateEvent } from '$types/matrix/room';
+import type { PackContent } from '$plugins/custom-emoji';
+import { getImagePackStateEventTypes, ImagePack } from '$plugins/custom-emoji';
+
 import { useRoomImagePack } from '$hooks/useImagePacks';
 import { randomStr } from '$utils/common';
 import { useRoomPermissions } from '$hooks/useRoomPermissions';
@@ -21,9 +22,6 @@ export function RoomImagePack({ room, stateKey }: RoomImagePackProps) {
   const powerLevels = usePowerLevels(room);
   const creators = useRoomCreators(room);
 
-  const permissions = useRoomPermissions(creators, powerLevels);
-  const canEditImagePack = permissions.stateEvent(StateEvent.PoniesRoomEmotes, userId);
-
   const fallbackPack = useMemo(() => {
     const fakePackId = randomStr(4);
     return new ImagePack(
@@ -37,19 +35,23 @@ export function RoomImagePack({ room, stateKey }: RoomImagePackProps) {
   }, [room.roomId, stateKey]);
   const imagePack = useRoomImagePack(room, stateKey) ?? fallbackPack;
 
+  const permissions = useRoomPermissions(creators, powerLevels);
+  const canEditImagePack = getImagePackStateEventTypes(room, stateKey).every((eventType) =>
+    permissions.stateEvent(eventType, userId)
+  );
+
   const handleUpdate = useCallback(
     async (packContent: PackContent) => {
       const { address } = imagePack;
       if (!address) return;
 
-      await mx.sendStateEvent(
-        address.roomId,
-        StateEvent.PoniesRoomEmotes,
-        packContent,
-        address.stateKey
+      await Promise.all(
+        getImagePackStateEventTypes(room, address.stateKey).map((eventType) =>
+          mx.sendStateEvent(address.roomId, eventType, packContent, address.stateKey)
+        )
       );
     },
-    [mx, imagePack]
+    [mx, imagePack, room]
   );
 
   return (

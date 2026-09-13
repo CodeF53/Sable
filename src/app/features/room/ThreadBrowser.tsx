@@ -1,134 +1,84 @@
-import {
-  ChangeEventHandler,
-  MouseEventHandler,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
-import {
-  Box,
-  Header,
-  Icon,
-  IconButton,
-  Icons,
-  Input,
-  Scroll,
-  Text,
-  Avatar,
-  config,
-  Chip,
-} from 'folds';
-import { MatrixEvent, Room, Thread, ThreadEvent } from '$types/matrix-sdk';
+import type { ChangeEventHandler, MouseEventHandler } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Box, Header, IconButton, Input, Scroll, Spinner, Text, config, Chip, toRem } from 'folds';
+import type { EventTimelineSet, MatrixEvent, Room, Thread } from '$types/matrix-sdk';
+import { NotificationCountType, RoomEvent, ThreadEvent } from '$types/matrix-sdk';
 import { useAtomValue } from 'jotai';
-import { HTMLReactParserOptions } from 'html-react-parser';
-import { Opts as LinkifyOpts } from 'linkifyjs';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
 import { useRoomNavigate } from '$hooks/useRoomNavigate';
 import { nicknamesAtom } from '$state/nicknames';
-import { getMemberAvatarMxc, getMemberDisplayName, reactionOrEditEvent } from '$utils/room';
-import { getMxIdLocalPart, mxcUrlToHttp } from '$utils/matrix';
-import { UserAvatar } from '$components/user-avatar';
-import {
-  AvatarBase,
-  ModernLayout,
-  RedactedContent,
-  Time,
-  Username,
-  UsernameBold,
-  Reply,
-} from '$components/message';
-import { RenderMessageContent } from '$components/RenderMessageContent';
+import { profilesCacheAtom } from '$state/userRoomProfile';
+import { useRoomMemberHydration } from '$hooks/useRoomMemberHydration';
+import { getMemberDisplayName } from '$utils/room/display';
+import { reactionOrEditEvent } from '$utils/room/relations';
+import { getMxIdLocalPart } from '$utils/matrix';
+import { Chats, chipIcon, composerIcon, MagnifyingGlass, X } from '$components/icons/phosphor';
 import { settingsAtom } from '$state/settings';
 import { useSetting } from '$state/hooks/settings';
-import { GetContentCallback } from '$types/matrix/room';
-import { useMentionClickHandler } from '$hooks/useMentionClickHandler';
-import { useSpoilerClickHandler } from '$hooks/useSpoilerClickHandler';
-import {
-  factoryRenderLinkifyWithMention,
-  getReactCustomHtmlParser,
-  LINKIFY_OPTS,
-  makeMentionCustomProps,
-  renderMatrixMention,
-} from '$plugins/react-custom-html-parser';
-import { EncryptedContent } from './message';
+import { MessagePreview, useRoomMessagePreviewRenderer } from '$components/message-preview';
+import { UnreadBadge, UnreadBadgeCenter } from '$components/unread-badge';
 import * as css from './ThreadDrawer.css';
+import { SidebarResizer } from '$pages/client/sidebar/SidebarResizer';
+import { isMobileOrTablet } from '$utils/platform';
+import { useDismissOnBack } from '$utils/androidBack';
+import { useMatrixEvent } from '$hooks/useMatrixEvent';
 
 type ThreadPreviewProps = {
   room: Room;
   thread: Thread;
   onClick: (threadId: string) => void;
+  onJump?: () => void;
 };
 
-function ThreadPreview({ room, thread, onClick }: ThreadPreviewProps) {
-  const mx = useMatrixClient();
-  const useAuthentication = useMediaAuthentication();
+function ThreadPreview({ room, thread, onClick, onJump }: ThreadPreviewProps) {
   const { navigateRoom } = useRoomNavigate();
   const nicknames = useAtomValue(nicknamesAtom);
+  const cachedProfiles = useAtomValue(profilesCacheAtom);
   const [hour24Clock] = useSetting(settingsAtom, 'hour24Clock');
   const [dateFormatString] = useSetting(settingsAtom, 'dateFormatString');
-  const [mediaAutoLoad] = useSetting(settingsAtom, 'mediaAutoLoad');
-  const [urlPreview] = useSetting(settingsAtom, 'urlPreview');
-  const mentionClickHandler = useMentionClickHandler(room.roomId);
-  const spoilerClickHandler = useSpoilerClickHandler();
-
-  const linkifyOpts = useMemo<LinkifyOpts>(
-    () => ({
-      ...LINKIFY_OPTS,
-      render: factoryRenderLinkifyWithMention((href: string) =>
-        renderMatrixMention(
-          mx,
-          room.roomId,
-          href,
-          makeMentionCustomProps(mentionClickHandler),
-          nicknames
-        )
-      ),
-    }),
-    [mx, room.roomId, nicknames, mentionClickHandler]
-  );
-
-  const htmlReactParserOptions = useMemo<HTMLReactParserOptions>(
-    () =>
-      getReactCustomHtmlParser(mx, room.roomId, {
-        linkifyOpts,
-        handleSpoilerClick: spoilerClickHandler,
-        handleMentionClick: mentionClickHandler,
-        useAuthentication,
-        nicknames,
-      }),
-    [mx, room, linkifyOpts, mentionClickHandler, spoilerClickHandler, useAuthentication, nicknames]
-  );
+  const renderContent = useRoomMessagePreviewRenderer(room);
 
   const handleJumpClick: MouseEventHandler = useCallback(
     (evt) => {
       evt.stopPropagation();
       navigateRoom(room.roomId, thread.id);
+      onJump?.();
     },
-    [navigateRoom, room.roomId, thread.id]
+    [navigateRoom, room.roomId, thread.id, onJump]
+  );
+
+  const [, forceUnread] = useState(0);
+  const onUnread = useCallback(
+    (_count: unknown, threadId?: string) => {
+      if (!threadId || threadId === thread.id) forceUnread((n) => n + 1);
+    },
+    [thread.id]
+  );
+  useMatrixEvent(room, RoomEvent.UnreadNotifications, onUnread);
+  const unreadTotal = room.getThreadUnreadNotificationCount(thread.id, NotificationCountType.Total);
+  const unreadHighlight = room.getThreadUnreadNotificationCount(
+    thread.id,
+    NotificationCountType.Highlight
   );
 
   const { rootEvent } = thread;
+  const lastReply = thread.events.findLast(
+    (ev: MatrixEvent) => ev.getId() !== thread.id && !reactionOrEditEvent(ev)
+  );
+  const lastSenderId = lastReply?.getSender() ?? '';
+  useRoomMemberHydration(room, lastSenderId);
+
   if (!rootEvent) return null;
 
-  const senderId = rootEvent.getSender() ?? '';
-  const displayName =
-    getMemberDisplayName(room, senderId, nicknames) ?? getMxIdLocalPart(senderId) ?? senderId;
-  const senderAvatarMxc = getMemberAvatarMxc(room, senderId);
-  const getContent = (() => rootEvent.getContent()) as GetContentCallback;
-
-  const replyCount = thread.events.filter(
+  const localReplyCount = thread.events.filter(
     (ev: MatrixEvent) => ev.getId() !== thread.id && !reactionOrEditEvent(ev)
   ).length;
+  // Use Math.max so we never show fewer replies than the server reports.
+  const replyCount = Math.max(localReplyCount, thread.length ?? 0);
 
-  const lastReply = thread.events
-    .filter((ev: MatrixEvent) => ev.getId() !== thread.id && !reactionOrEditEvent(ev))
-    .at(-1);
-  const lastSenderId = lastReply?.getSender() ?? '';
   const lastDisplayName =
     getMemberDisplayName(room, lastSenderId, nicknames) ??
+    cachedProfiles[lastSenderId]?.displayName ??
     getMxIdLocalPart(lastSenderId) ??
     lastSenderId;
   const lastContent = lastReply?.getContent();
@@ -142,105 +92,47 @@ function ThreadPreview({ room, thread, onClick }: ThreadPreviewProps) {
       className={css.ThreadBrowserItem}
       onClick={() => onClick(thread.id)}
     >
-      <ModernLayout
-        before={
-          <AvatarBase>
-            <Avatar size="300">
-              <UserAvatar
-                userId={senderId}
-                src={
-                  senderAvatarMxc
-                    ? (mxcUrlToHttp(mx, senderAvatarMxc, useAuthentication, 48, 48, 'crop') ??
-                      undefined)
-                    : undefined
-                }
-                alt={displayName}
-                renderFallback={() => <Icon size="200" src={Icons.User} filled />}
-              />
-            </Avatar>
-          </AvatarBase>
-        }
-      >
-        <Box gap="300" justifyContent="SpaceBetween" alignItems="Center" grow="Yes">
-          <Box gap="200" alignItems="Baseline">
-            <Username>
-              <Text as="span" truncate>
-                <UsernameBold>{displayName}</UsernameBold>
-              </Text>
-            </Username>
-            <Time
-              ts={rootEvent.getTs()}
-              hour24Clock={hour24Clock}
-              dateFormatString={dateFormatString}
-            />
-          </Box>
-          <Box shrink="No">
+      <MessagePreview
+        room={room}
+        event={rootEvent}
+        renderContent={renderContent}
+        actions={
+          <Box shrink="No" alignItems="Center" gap="200">
+            {unreadTotal > 0 && (
+              <UnreadBadgeCenter>
+                <UnreadBadge highlight={unreadHighlight > 0} count={unreadTotal} />
+              </UnreadBadgeCenter>
+            )}
             <Chip data-event-id={thread.id} onClick={handleJumpClick} radii="Pill">
               <Text size="T200">Jump</Text>
             </Chip>
           </Box>
-        </Box>
-        {rootEvent.replyEventId && (
-          <Reply
-            room={room}
-            replyEventId={rootEvent.replyEventId}
-            threadRootId={rootEvent.threadRootId}
-            mentions={rootEvent.getContent()['m.mentions']}
-            onClick={handleJumpClick}
-          />
-        )}
-        <Box
-          style={{
-            maxHeight: '200px',
-            overflow: 'auto',
-            flexShrink: 0,
-          }}
-        >
-          <EncryptedContent mEvent={rootEvent}>
-            {() => {
-              if (rootEvent.isRedacted()) {
-                return <RedactedContent />;
-              }
-
-              return (
-                <RenderMessageContent
-                  displayName={displayName}
-                  msgType={rootEvent.getContent().msgtype ?? ''}
-                  ts={rootEvent.getTs()}
-                  getContent={getContent}
-                  edited={!!rootEvent.replacingEvent()}
-                  mediaAutoLoad={mediaAutoLoad}
-                  urlPreview={urlPreview}
-                  htmlReactParserOptions={htmlReactParserOptions}
-                  linkifyOpts={linkifyOpts}
-                  outlineAttachment
-                />
-              );
-            }}
-          </EncryptedContent>
-        </Box>
-        {replyCount > 0 && (
-          <Box gap="100" alignItems="Center" style={{ marginTop: config.space.S200 }}>
-            <Text size="T200" priority="300" style={{ flexShrink: 0 }}>
-              {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+        }
+        onOpen={handleJumpClick}
+        hour24Clock={hour24Clock}
+        dateFormatString={dateFormatString}
+      />
+      {replyCount > 0 && (
+        <Box gap="100" alignItems="Center" style={{ marginTop: config.space.S200 }}>
+          <Text size="T200" priority="300" style={{ flexShrink: 0 }}>
+            {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+          </Text>
+          {lastReply && lastBody && (
+            <Text
+              size="T200"
+              priority="300"
+              style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                minWidth: 0,
+              }}
+            >
+              · {lastDisplayName}: {lastBody.slice(0, 60)}
             </Text>
-            {lastReply && lastBody && (
-              <Text
-                size="T200"
-                priority="300"
-                style={{
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  minWidth: 0,
-                }}
-              >
-                · {lastDisplayName}: {lastBody.slice(0, 60)}
-              </Text>
-            )}
-          </Box>
-        )}
-      </ModernLayout>
+          )}
+        </Box>
+      )}
     </Box>
   );
 }
@@ -253,24 +145,143 @@ type ThreadBrowserProps = {
 };
 
 export function ThreadBrowser({ room, onOpenThread, onClose, overlay }: ThreadBrowserProps) {
+  const mx = useMatrixClient();
   const [, forceUpdate] = useState(0);
   const [query, setQuery] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [canLoadMore, setCanLoadMore] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const threadListTimelineSetRef = useRef<EventTimelineSet | null>(null);
+  const loadingMoreRef = useRef(false);
+  const canLoadMoreRef = useRef(false);
+  canLoadMoreRef.current = canLoadMore;
+  useDismissOnBack(onClose);
 
-  // Re-render when threads change.
+  // On mount, set up thread event listeners, create the server-side thread
+  // timeline sets, then fetch page 1 via paginate.  The two operations are
+  // sequenced in a single effect so that createThreadsTimelineSets() always
+  // resolves before fetchRoomThreads() runs — the SDK's fetchRoomThreadList
+  // has an early-return guard (`if (this.threadsTimelineSets.length === 0)`)
+  // that silently no-ops when the sets haven't been created yet, so running
+  // both in parallel (the old two-effect approach) caused fetchRoomThreads to
+  // always be a no-op and left threadsReady=true prematurely.
   useEffect(() => {
     const onUpdate = () => forceUpdate((n) => n + 1);
-    room.on(ThreadEvent.New as any, onUpdate);
-    room.on(ThreadEvent.Update as any, onUpdate);
-    room.on(ThreadEvent.NewReply as any, onUpdate);
-    return () => {
-      room.off(ThreadEvent.New as any, onUpdate);
-      room.off(ThreadEvent.Update as any, onUpdate);
-      room.off(ThreadEvent.NewReply as any, onUpdate);
-    };
-  }, [room]);
+    room.on(ThreadEvent.New, onUpdate);
+    room.on(ThreadEvent.Update, onUpdate);
+    room.on(ThreadEvent.NewReply, onUpdate);
 
-  const allThreads = room.getThreads().sort((a: Thread, b: Thread) => {
+    let cancelled = false;
+    const loadThreads = async () => {
+      setLoadingMore(true);
+      try {
+        // Create the timeline sets first — required before fetchRoomThreads().
+        const sets = await room.createThreadsTimelineSets();
+        if (!sets || cancelled) return;
+        const [allThreadsSet] = sets;
+        threadListTimelineSetRef.current = allThreadsSet;
+
+        // Now fetch page 1 from the /threads endpoint.  threadsTimelineSets is
+        // populated so fetchRoomThreadList will not early-return.
+        await room.fetchRoomThreads().catch((err: unknown) => {
+          console.warn('ThreadBrowser: fetchRoomThreads failed', err);
+        });
+
+        // Paginate to load the first page into the timeline set.
+        const hasMore = await mx.paginateEventTimeline(allThreadsSet.getLiveTimeline(), {
+          backwards: true,
+        });
+        // Ensure Thread objects exist for server-returned thread roots not yet
+        // known locally (threads outside the current sliding-sync window).
+        // fetchRoomThreads() creates Thread objects internally but uses
+        // room.findEventById() to set rootEvent — if the root event isn't in
+        // the sliding-sync cache, rootEvent ends up undefined, and
+        // ThreadPreview returns null for those threads.  Backfill here using
+        // the event we already have from the threads timeline set.
+        allThreadsSet
+          .getLiveTimeline()
+          .getEvents()
+          .filter((event) => !!event.getId())
+          .forEach((event) => {
+            const id = event.getId()!;
+            const existingThread = room.getThread(id);
+
+            if (!existingThread) {
+              room.createThread(id, event, [], false);
+            } else {
+              if (!existingThread.rootEvent) {
+                existingThread.rootEvent = event;
+                existingThread.setEventMetadata(event);
+              }
+            }
+          });
+        if (!cancelled) {
+          setCanLoadMore(hasMore);
+          forceUpdate((n) => n + 1);
+        }
+      } catch {
+        // Server doesn't support thread list API; fall back to locally known threads.
+      } finally {
+        if (!cancelled) setLoadingMore(false);
+      }
+    };
+    loadThreads();
+
+    return () => {
+      cancelled = true;
+      room.off(ThreadEvent.New, onUpdate);
+      room.off(ThreadEvent.Update, onUpdate);
+      room.off(ThreadEvent.NewReply, onUpdate);
+    };
+  }, [room, mx]);
+
+  const handleLoadMore = useCallback(async () => {
+    const tls = threadListTimelineSetRef.current;
+    if (!tls || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const hasMore = await mx.paginateEventTimeline(tls.getLiveTimeline(), {
+        backwards: true,
+      });
+      tls
+        .getLiveTimeline()
+        .getEvents()
+        .filter((event) => !!event.getId())
+        .forEach((event) => {
+          const id = event.getId()!;
+          const existingThread = room.getThread(id);
+
+          if (!existingThread) {
+            room.createThread(id, event, [], false);
+          } else {
+            if (!existingThread.rootEvent) {
+              existingThread.rootEvent = event;
+              existingThread.setEventMetadata(event);
+            }
+          }
+        });
+      setCanLoadMore(hasMore);
+      forceUpdate((n) => n + 1);
+    } catch {
+      // ignore
+    } finally {
+      setLoadingMore(false);
+      loadingMoreRef.current = false;
+    }
+  }, [mx, room, loadingMore]);
+
+  const handleLoadMoreRef = useRef(handleLoadMore);
+  handleLoadMoreRef.current = handleLoadMore;
+
+  const handleThreadsScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 200 && canLoadMoreRef.current && !loadingMoreRef.current) {
+      handleLoadMoreRef.current();
+    }
+  }, []);
+
+  const allThreads = room.getThreads().toSorted((a: Thread, b: Thread) => {
     const aTs = a.events.at(-1)?.getTs() ?? a.rootEvent?.getTs() ?? 0;
     const bTs = b.events.at(-1)?.getTs() ?? b.rootEvent?.getTs() ?? 0;
     return bTs - aTs;
@@ -288,23 +299,42 @@ export function ThreadBrowser({ room, onOpenThread, onClose, overlay }: ThreadBr
     setQuery(e.target.value);
   };
 
+  const [threadSidebarWidth, setThreadSidebarWidth] = useSetting(
+    settingsAtom,
+    'threadSidebarWidth'
+  );
+  const [curWidth, setCurWidth] = useState(threadSidebarWidth);
+  useEffect(() => {
+    setCurWidth(threadSidebarWidth);
+  }, [threadSidebarWidth]);
   return (
     <Box
       className={overlay ? css.ThreadDrawerOverlay : css.ThreadDrawer}
       direction="Column"
       shrink="No"
+      style={{
+        position: 'relative',
+        width: overlay ? '100%' : toRem(curWidth),
+      }}
     >
-      <Header className={css.ThreadDrawerHeader} variant="Background" size="400">
+      {!isMobileOrTablet() && (
+        <SidebarResizer
+          setCurWidth={setCurWidth}
+          sidebarWidth={threadSidebarWidth}
+          setSidebarWidth={setThreadSidebarWidth}
+          minValue={150}
+          maxValue={600}
+          isReversed
+        />
+      )}
+      <Header className={css.ThreadDrawerHeader} variant="Background" size="600">
         <Box grow="Yes" alignItems="Center" gap="200">
-          <Icon size="200" src={Icons.Thread} />
+          {composerIcon(Chats)}
           <Text size="H4" truncate>
             Threads
           </Text>
         </Box>
         <Box alignItems="Center" gap="200" shrink="No">
-          <Text size="T300" priority="300" truncate>
-            # {room.name}
-          </Text>
           <IconButton
             onClick={onClose}
             variant="SurfaceVariant"
@@ -312,7 +342,7 @@ export function ThreadBrowser({ room, onOpenThread, onClose, overlay }: ThreadBr
             radii="300"
             aria-label="Close threads"
           >
-            <Icon size="200" src={Icons.Cross} />
+            {composerIcon(X)}
           </IconButton>
         </Box>
       </Header>
@@ -331,7 +361,7 @@ export function ThreadBrowser({ room, onOpenThread, onClose, overlay }: ThreadBr
           variant="Surface"
           size="400"
           radii="400"
-          before={<Icon size="50" src={Icons.Search} />}
+          before={chipIcon(MagnifyingGlass)}
           after={
             query ? (
               <IconButton
@@ -344,7 +374,7 @@ export function ThreadBrowser({ room, onOpenThread, onClose, overlay }: ThreadBr
                 }}
                 aria-label="Clear search"
               >
-                <Icon size="50" src={Icons.Cross} />
+                {chipIcon(X)}
               </IconButton>
             ) : undefined
           }
@@ -356,31 +386,63 @@ export function ThreadBrowser({ room, onOpenThread, onClose, overlay }: ThreadBr
           variant="Background"
           visibility="Hover"
           direction="Vertical"
-          hideTrack
+          size="300"
+          onScroll={handleThreadsScroll}
           style={{ flexGrow: 1 }}
         >
-          {threads.length === 0 ? (
-            <Box
-              direction="Column"
-              alignItems="Center"
-              justifyContent="Center"
-              style={{ padding: config.space.S400, gap: config.space.S200 }}
-            >
-              <Icon size="400" src={Icons.Thread} />
-              <Text size="T300" align="Center">
-                {lowerQuery ? 'No threads match your search.' : 'No threads yet.'}
-              </Text>
-            </Box>
-          ) : (
-            <Box
-              direction="Column"
-              style={{ padding: `${config.space.S100} ${config.space.S200}` }}
-            >
-              {threads.map((thread: Thread) => (
-                <ThreadPreview key={thread.id} room={room} thread={thread} onClick={onOpenThread} />
-              ))}
-            </Box>
-          )}
+          {(() => {
+            if (threads.length === 0 && loadingMore)
+              return (
+                <Box
+                  direction="Column"
+                  alignItems="Center"
+                  justifyContent="Center"
+                  style={{ padding: config.space.S400, gap: config.space.S200 }}
+                >
+                  <Spinner variant="Secondary" size="400" />
+                </Box>
+              );
+            if (threads.length === 0)
+              return (
+                <Box
+                  direction="Column"
+                  alignItems="Center"
+                  justifyContent="Center"
+                  style={{ padding: config.space.S400, gap: config.space.S200 }}
+                >
+                  {composerIcon(Chats, { style: { opacity: 0.6 } })}
+                  <Text size="T300" align="Center">
+                    {lowerQuery ? 'No threads match your search.' : 'No threads yet.'}
+                  </Text>
+                </Box>
+              );
+            return (
+              <>
+                <Box
+                  direction="Column"
+                  style={{ padding: `${config.space.S100} ${config.space.S200}` }}
+                >
+                  {threads.map((thread: Thread) => (
+                    <ThreadPreview
+                      key={thread.id}
+                      room={room}
+                      thread={thread}
+                      onClick={onOpenThread}
+                      onJump={onClose}
+                    />
+                  ))}
+                </Box>
+                {loadingMore && (
+                  <Box
+                    justifyContent="Center"
+                    style={{ padding: config.space.S300, flexShrink: 0 }}
+                  >
+                    <Spinner variant="Secondary" size="400" />
+                  </Box>
+                )}
+              </>
+            );
+          })()}
         </Scroll>
       </Box>
     </Box>

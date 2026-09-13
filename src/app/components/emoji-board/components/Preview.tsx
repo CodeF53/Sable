@@ -1,7 +1,9 @@
 import { Box, Text } from 'folds';
-import { Atom, atom, useAtomValue } from 'jotai';
+import type { Atom } from 'jotai';
+import { atom, useAtomValue } from 'jotai';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
+import { Image as MediaImage } from '$components/media';
 import { mxcUrlToHttp } from '$utils/matrix';
 import * as css from './styles.css';
 
@@ -34,9 +36,9 @@ export function Preview({ previewAtom }: PreviewProps) {
           justifyContent="Center"
         >
           {key.startsWith('mxc://') ? (
-            <img
+            <MediaImage
               className={css.PreviewImg}
-              src={mxcUrlToHttp(mx, key, useAuthentication) ?? key}
+              src={mxcUrlToHttp(mx, key, useAuthentication) ?? undefined}
               alt={shortcode}
             />
           ) : (

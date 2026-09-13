@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
+//MISE hide=true
+//MISE description="Normalize import paths across the codebase"
+/* oxlint-disable no-console */
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -212,7 +214,7 @@ function rewriteFileImports(filePath, sourceCode, aliases, projectRoot) {
 
   const uniqueReplacements = Array.from(
     new Map(replacements.map((r) => [`${r.start}:${r.end}`, r])).values()
-  ).sort((a, b) => b.start - a.start);
+  ).toSorted((a, b) => b.start - a.start);
 
   const updatedCode = uniqueReplacements.reduce(
     (code, replacement) =>

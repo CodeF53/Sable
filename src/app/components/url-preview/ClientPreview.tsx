@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useState, ReactNode } from 'react';
-import { Box, Badge, Icon, IconButton, Icons, Spinner, Text, as, toRem } from 'folds';
+import type { ReactNode } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Box, Badge, IconButton, Spinner, Text, as, toRem } from 'folds';
+import { Link, sizedIcon } from '$components/icons/phosphor';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { useSetting } from '$state/hooks/settings';
 import { settingsAtom } from '$state/settings';
 import { encodeBlurHash } from '$utils/blurHash';
-import { MATRIX_BLUR_HASH_PROPERTY_NAME } from '$types/matrix/common';
+import { fetch } from '$utils/fetch';
 import { Attachment, AttachmentBox, AttachmentHeader } from '../message/attachment';
-import { Image } from '../media';
+import { Image as MediaImage } from '../media';
 import { UrlPreview } from './UrlPreview';
 import { VideoContent } from '../message';
+import { MATRIX_UNSTABLE_BLUR_HASH_PROPERTY_NAME } from '../../../unstable/prefixes';
 
 interface OEmbed {
   type: 'photo' | 'video' | 'link' | 'rich';
@@ -29,17 +32,22 @@ interface OEmbed {
 }
 
 async function oEmbedData(url: string): Promise<OEmbed> {
-  const data = await fetch(url).then((resp) => resp.json());
+  const response = await fetch(url);
+  // YouTube answers errors with a plain-text body under an application/json content type,
+  // so the status has to be checked before parsing.
+  if (!response.ok) {
+    throw new Error(`oEmbed request failed: ${response.status}`);
+  }
 
-  return data;
+  return response.json();
 }
 
-export type EmbedHeaderProps = {
+type EmbedHeaderProps = {
   title: string;
   source: string;
   after?: ReactNode;
 };
-export const EmbedHeader = as<'div', EmbedHeaderProps>(({ title, source, after }) => (
+const EmbedHeader = as<'div', EmbedHeaderProps>(({ title, source, after }) => (
   <AttachmentHeader>
     <Box alignItems="Center" gap="200" grow="Yes">
       <Box shrink="No">
@@ -62,10 +70,10 @@ export const EmbedHeader = as<'div', EmbedHeaderProps>(({ title, source, after }
 type EmbedOpenButtonProps = {
   url: string;
 };
-export function EmbedOpenButton({ url }: EmbedOpenButtonProps) {
+function EmbedOpenButton({ url }: EmbedOpenButtonProps) {
   return (
     <IconButton size="300" radii="300" onClick={() => window.open(url, '_blank')}>
-      <Icon size="100" src={Icons.Link} />
+      {sizedIcon(Link, '100')}
     </IconButton>
   );
 }
@@ -75,7 +83,7 @@ type YoutubeElementProps = {
   embedData: OEmbed;
 };
 
-export const YoutubeElement = as<'div', YoutubeElementProps>(({ videoInfo, embedData }) => {
+const YoutubeElement = as<'div', YoutubeElementProps>(({ videoInfo, embedData }) => {
   const thumbnailUrl = `https://i.ytimg.com/vi/${videoInfo.videoId}/hqdefault.jpg`;
 
   const timestamp = videoInfo.timestamp ? `&start=${videoInfo.timestamp}` : '';
@@ -113,10 +121,10 @@ export const YoutubeElement = as<'div', YoutubeElementProps>(({ videoInfo, embed
           mimeType="fake"
           url={videoUrl}
           info={{
-            thumbnail_info: { [MATRIX_BLUR_HASH_PROPERTY_NAME]: blurHash },
+            thumbnail_info: { [MATRIX_UNSTABLE_BLUR_HASH_PROPERTY_NAME]: blurHash },
           }}
           renderThumbnail={() => (
-            <Image
+            <MediaImage
               src={thumbnailUrl}
               /*
 								this allows the blurhash to be computed, otherwise it throws an "insecure operation" error
@@ -156,33 +164,48 @@ type YoutubeLink = {
   isMusic: boolean;
 };
 
-function parseYoutubeLink(url: string): YoutubeLink | null {
-  const urlsplit = url.split('/');
-  const path = urlsplit[urlsplit.length - 1];
+function parseYoutubeLink(url: Readonly<string>): YoutubeLink | null {
+  /**
+   * the parsed version of `url`
+   */
+  let parsedURL: URL;
+  try {
+    parsedURL = new URL(url);
+  } catch {
+    // new URL can throw
+    return null;
+  }
+  const urlHost = parsedURL.host;
+  const urlSearchParams = parsedURL.searchParams;
 
+  /**
+   * The id of the youtube video, for example `MTn_bhTVr2U`
+   */
   let videoId: string | undefined;
-  let params: string[];
 
-  if (url.includes('youtu.be')) {
-    const split = path.split('?');
-    [videoId] = split;
-    params = split[1]?.split('&');
-  } else if (url.includes('/shorts/')) {
-    const split = path.split('/shorts/');
-    [videoId] = split;
-    params = split[1]?.split('shorts');
-  } else if (url.includes('youtube.com')) {
-    params = path.split('?')[1].split('&');
-    videoId = params.find((s) => s.startsWith('v='), params)?.split('v=')[1];
+  if (urlHost === 'youtu.be' || urlHost.endsWith('.youtu.be')) {
+    // example https://youtu.be/MTn_bhTVr2U?si=xxxx
+    // pathname includes the leading `/` so we have to split that
+    videoId = parsedURL.pathname.slice(1);
+  } else if (parsedURL.pathname.startsWith('/shorts/')) {
+    // example https://youtube.com/shorts/R0KZIPOqITw?si=xxxx
+    videoId = parsedURL.pathname.split('/').findLast(Boolean);
+  } else if (
+    (urlHost === 'youtube.com' || urlHost.endsWith('.youtube.com')) &&
+    parsedURL.pathname === '/watch'
+  ) {
+    // example: https://www.youtube.com/watch?v=MTn_bhTVr2U&list=RDjcB4zu4KX10&index=3
+    // get returns null if `v` is not in the url
+    videoId = urlSearchParams.get('v') ?? undefined;
   } else return null;
 
   if (!videoId) return null;
 
   // playlist is not used for the embed, it can be appended as is
-  const playlist = params ? params.find((s) => s.startsWith('list='), params) : undefined;
-  const timestamp = params
-    ? params.find((s) => s.startsWith('t='), params)?.split('t=')[1]
-    : undefined;
+  // returns null if `list` doesn't exist
+  const playlist = urlSearchParams.get('list') ?? undefined;
+  // returns null if `t` doesn't exist
+  const timestamp = urlSearchParams.get('t') ?? urlSearchParams.get('start') ?? undefined;
 
   return {
     videoId,
@@ -212,7 +235,8 @@ export const ClientPreview = as<'div', { url: string }>(({ url, ...props }, ref)
   useEffect(() => {
     const fetchYoutube = isYoutube && showYoutube;
 
-    if (fetchYoutube) loadEmbed();
+    // The card renders nothing on error; keep the failure out of the global handler.
+    if (fetchYoutube) loadEmbed().catch(() => undefined);
   }, [isYoutube, showYoutube, loadEmbed]);
 
   let previewContent;

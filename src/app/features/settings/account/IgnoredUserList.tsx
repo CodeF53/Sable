@@ -1,17 +1,18 @@
-import { ChangeEventHandler, FormEventHandler, useCallback, useState } from 'react';
-import { Box, Button, Chip, Icon, IconButton, Icons, Input, Spinner, Text, config } from 'folds';
-import { SequenceCard } from '$components/sequence-card';
+import type { ChangeEventHandler, FormEventHandler } from 'react';
+import { useCallback, useState } from 'react';
+import { Box, Button, Chip, IconButton, Input, Spinner, Text, config } from 'folds';
+import { menuIcon, X } from '$components/icons/phosphor';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { SettingTile } from '$components/setting-tile';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { isUserId } from '$utils/matrix';
 import { useIgnoredUsers } from '$hooks/useIgnoredUsers';
 import { useAlive } from '$hooks/useAlive';
-import { SequenceCardStyle } from '$features/settings/styles.css';
 
 function IgnoreUserInput({ userList }: { userList: string[] }) {
   const mx = useMatrixClient();
-  const [userId, setUserId] = useState<string>('');
+  const [userId, setUserId] = useState('');
   const alive = useAlive();
 
   const [ignoreState, ignore] = useAsyncCallback(
@@ -73,7 +74,7 @@ function IgnoreUserInput({ userList }: { userList: string[] }) {
                 radii="300"
                 variant="Secondary"
               >
-                <Icon src={Icons.Cross} size="100" />
+                {menuIcon(X)}
               </IconButton>
             )
           }
@@ -111,13 +112,7 @@ function IgnoredUserChip({ userId, userList }: { userId: string; userList: strin
     <Chip
       variant="Secondary"
       radii="Pill"
-      after={
-        unIgnoring ? (
-          <Spinner variant="Secondary" size="100" />
-        ) : (
-          <Icon src={Icons.Cross} size="100" />
-        )
-      }
+      after={unIgnoring ? <Spinner variant="Secondary" size="100" /> : menuIcon(X)}
       onClick={handleUnignore}
       disabled={unIgnoring}
     >
@@ -144,6 +139,7 @@ export function IgnoredUserList() {
       >
         <SettingTile
           title="Select User"
+          focusId="blocked-users"
           description="Prevent receiving messages or invites from user by adding their userId."
         >
           <Box direction="Column" gap="300">

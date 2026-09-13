@@ -1,10 +1,9 @@
 import { useCallback, useEffect } from 'react';
 import { Box, Text, Chip } from 'folds';
-import { SequenceCard } from '$components/sequence-card';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { SettingTile } from '$components/setting-tile';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
-import { SequenceCardStyle } from '$features/settings/styles.css';
 
 export function ContactInformation() {
   const mx = useMatrixClient();
@@ -14,7 +13,7 @@ export function ContactInformation() {
   const threePIds =
     threePIdsState.status === AsyncStatus.Success ? threePIdsState.data.threepids : undefined;
 
-  const emailIds = threePIds?.filter((id) => id.medium === 'email');
+  const emailIds = threePIds?.filter((id) => (id.medium as string) === 'email');
 
   useEffect(() => {
     loadThreePIds();
@@ -29,7 +28,11 @@ export function ContactInformation() {
         direction="Column"
         gap="400"
       >
-        <SettingTile title="Email Address" description="Email address attached to your account.">
+        <SettingTile
+          title="Email Address"
+          focusId="email-address"
+          description="Email address attached to your account."
+        >
           <Box>
             {emailIds?.map((email) => (
               <Chip key={email.address} as="span" variant="Secondary" radii="Pill">

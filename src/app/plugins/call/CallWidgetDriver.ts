@@ -1,3 +1,4 @@
+import type { SimpleObservable, IOpenIDUpdate } from 'matrix-widget-api';
 import {
   type Capability,
   type ISendDelayedEventDetails,
@@ -10,25 +11,48 @@ import {
   type IGetMediaConfigResult,
   UpdateDelayedEventAction,
   OpenIDRequestState,
-  SimpleObservable,
-  IOpenIDUpdate,
 } from 'matrix-widget-api';
+import type { MatrixClient } from '$types/matrix-sdk';
 import {
   EventType,
   type IContent,
+  KnownMembership,
   MatrixError,
   type MatrixEvent,
+  type Room,
   Direction,
   type SendDelayedEventResponse,
   type StateEvents,
   type TimelineEvents,
-  MatrixClient,
-} from 'matrix-js-sdk';
+} from '$types/matrix-sdk';
 import { getCallCapabilities } from './utils';
-import { downloadMedia, mxcUrlToHttp } from '../../utils/matrix';
+import { downloadMedia, mxcUrlToHttp, uploadContentToServer } from '../../utils/matrix';
 import { createDebugLogger } from '../../utils/debugLogger';
 
 const debugLog = createDebugLogger('CallWidgetDriver');
+
+export const hydrateWidgetRoster = async (room: Room): Promise<void> => {
+  try {
+    await room.loadMembersIfNeeded();
+  } catch (error) {
+    // A partial roster still beats failing the read and stalling state sync.
+    debugLog.warn('call', 'Failed to load room members for the call widget', {
+      roomId: room.roomId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  const joinedInState = room.getMembersWithMembership(KnownMembership.Join).length;
+  const joinedCount = room.getJoinedMemberCount();
+  if (joinedInState < joinedCount) {
+    debugLog.warn('call', 'Call widget roster is short of the joined member count', {
+      roomId: room.roomId,
+      joinedInState,
+      joinedCount,
+    });
+  }
+};
 
 export class CallWidgetDriver extends WidgetDriver {
   private allowedCapabilities: Set<Capability>;
@@ -53,7 +77,17 @@ export class CallWidgetDriver extends WidgetDriver {
   }
 
   public async validateCapabilities(requested: Set<Capability>): Promise<Set<Capability>> {
-    const allow = Array.from(requested).filter((cap) => this.allowedCapabilities.has(cap));
+    const requestedArray = Array.from(requested);
+    const allow = requestedArray.filter((cap) => this.allowedCapabilities.has(cap));
+    const denied = requestedArray.filter((cap) => !this.allowedCapabilities.has(cap));
+
+    if (denied.length > 0) {
+      debugLog.warn('call', 'Call widget requested unsupported capabilities', {
+        roomId: this.inRoomId,
+        deniedCapabilities: denied,
+      });
+    }
+
     return new Set(allow);
   }
 
@@ -85,7 +119,7 @@ export class CallWidgetDriver extends WidgetDriver {
         content as StateEvents[keyof StateEvents],
         stateKey
       );
-    } else if (eventType === EventType.RoomRedaction) {
+    } else if (eventType === (EventType.RoomRedaction as string)) {
       // special case: extract the `redacts` property and call redact
       r = await client.redactEvent(roomId, content.redacts);
     } else {
@@ -101,8 +135,7 @@ export class CallWidgetDriver extends WidgetDriver {
   }
 
   public async sendDelayedEvent(
-    delay: number | null,
-    parentDelayId: string | null,
+    delay: number,
     eventType: string,
     content: IContent,
     stateKey: string | null = null,
@@ -113,19 +146,7 @@ export class CallWidgetDriver extends WidgetDriver {
 
     if (!client || !roomId) throw new Error('Not in a room or not attached to a client');
 
-    let delayOpts;
-    if (delay !== null) {
-      delayOpts = {
-        delay,
-        ...(parentDelayId !== null && { parent_delay_id: parentDelayId }),
-      };
-    } else if (parentDelayId !== null) {
-      delayOpts = {
-        parent_delay_id: parentDelayId,
-      };
-    } else {
-      throw new Error('Must provide at least one of delay or parentDelayId');
-    }
+    const delayOpts = { delay };
 
     let r: SendDelayedEventResponse | null;
     if (stateKey !== null) {
@@ -152,6 +173,59 @@ export class CallWidgetDriver extends WidgetDriver {
       roomId,
       delayId: r.delay_id,
     };
+  }
+
+  public async sendStickyEvent(
+    stickyDurationMs: number,
+    eventType: string,
+    content: IContent,
+    targetRoomId: string | null = null
+  ): Promise<ISendEventDetails> {
+    const client = this.mx;
+    const roomId = targetRoomId || this.inRoomId;
+
+    if (!client || !roomId) throw new Error('Not in a room or not attached to a client');
+
+    const r = await client._unstable_sendStickyEvent(
+      roomId,
+      stickyDurationMs,
+      null,
+      eventType as keyof TimelineEvents,
+      content as TimelineEvents[keyof TimelineEvents]
+    );
+
+    return { roomId, eventId: r.event_id };
+  }
+
+  public async sendDelayedStickyEvent(
+    delay: number,
+    stickyDurationMs: number,
+    eventType: string,
+    content: IContent,
+    targetRoomId: string | null = null
+  ): Promise<ISendDelayedEventDetails> {
+    const client = this.mx;
+    const roomId = targetRoomId || this.inRoomId;
+
+    if (!client || !roomId) throw new Error('Not in a room or not attached to a client');
+
+    const r = await client._unstable_sendStickyDelayedEvent(
+      roomId,
+      stickyDurationMs,
+      { delay },
+      null,
+      eventType as keyof TimelineEvents,
+      content as TimelineEvents[keyof TimelineEvents]
+    );
+
+    return { roomId, delayId: r.delay_id };
+  }
+
+  public async readStickyEvents(roomId: string): Promise<IRoomEvent[]> {
+    const room = this.mx.getRoom(roomId);
+    if (room === null) return [];
+
+    return [...room._unstable_getStickyEvents()].map((e) => e.getEffectiveEvent() as IRoomEvent);
   }
 
   public async updateDelayedEvent(
@@ -191,10 +265,10 @@ export class CallWidgetDriver extends WidgetDriver {
       // attempt to re-batch these up into a single request
       const invertedContentMap: Record<string, { userId: string; deviceId: string }[]> = {};
 
-      // eslint-disable-next-line no-restricted-syntax
       for (const userId of Object.keys(contentMap)) {
         const userContentMap = contentMap[userId];
-        // eslint-disable-next-line no-restricted-syntax
+        if (!userContentMap) continue;
+
         for (const deviceId of Object.keys(userContentMap)) {
           const content = userContentMap[deviceId];
           const stringifiedContent = JSON.stringify(content);
@@ -236,6 +310,13 @@ export class CallWidgetDriver extends WidgetDriver {
     limit: number,
     since: string | undefined
   ): Promise<IRoomEvent[]> {
+    if (stateKey !== undefined) {
+      return this.readRoomState(roomId, eventType, stateKey);
+    }
+
+    const stateEvents = await this.readRoomState(roomId, eventType, undefined);
+    if (stateEvents.length > 0) return stateEvents;
+
     const safeLimit =
       limit > 0 ? Math.min(limit, Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER; // relatively arbitrary
 
@@ -246,13 +327,16 @@ export class CallWidgetDriver extends WidgetDriver {
 
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const ev = events[i];
+      if (!ev) continue;
       if (results.length >= safeLimit) break;
       if (since !== undefined && ev.getId() === since) break;
 
       if (
         ev.getType() === eventType &&
         !ev.isState() &&
-        (eventType !== EventType.RoomMessage || !msgtype || msgtype === ev.getContent().msgtype) &&
+        (eventType !== (EventType.RoomMessage as string) ||
+          !msgtype ||
+          msgtype === ev.getContent().msgtype) &&
         (ev.getStateKey() === undefined || stateKey === undefined || ev.getStateKey() === stateKey)
       ) {
         results.push(ev);
@@ -276,6 +360,9 @@ export class CallWidgetDriver extends WidgetDriver {
   ): Promise<IRoomEvent[]> {
     const room = this.mx.getRoom(roomId);
     if (room === null) return [];
+
+    if (eventType === (EventType.RoomMember as string)) await hydrateWidgetRoster(room);
+
     const state = room.getLiveTimeline().getState(Direction.Forward);
     if (state === undefined) return [];
 
@@ -345,7 +432,7 @@ export class CallWidgetDriver extends WidgetDriver {
   public async uploadFile(file: XMLHttpRequestBodyInit): Promise<{ contentUri: string }> {
     const client = this.mx;
 
-    const uploadResult = await client.uploadContent(file);
+    const uploadResult = await uploadContentToServer(client, file);
 
     return { contentUri: uploadResult.content_uri };
   }
@@ -355,7 +442,10 @@ export class CallWidgetDriver extends WidgetDriver {
     if (!httpUrl) {
       throw new Error('Call widget failed to download file! No http url!');
     }
-    const blob = await downloadMedia(httpUrl);
+    const blob = await downloadMedia(httpUrl, {
+      getAccessToken: () => this.mx.getAccessToken(),
+      sessionScope: this.mx.getUserId() ?? undefined,
+    });
     return { file: blob };
   }
 
@@ -363,7 +453,6 @@ export class CallWidgetDriver extends WidgetDriver {
     return this.mx.getVisibleRooms().map((r) => r.roomId);
   }
 
-  // eslint-disable-next-line class-methods-use-this
   public processError(error: unknown): IWidgetApiErrorResponseDataDetails | undefined {
     return error instanceof MatrixError
       ? { matrix_api_error: error.asWidgetApiErrorData() }

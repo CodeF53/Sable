@@ -1,9 +1,10 @@
-import { MatrixEvent } from '$types/matrix-sdk';
+import type { MatrixEvent } from '$types/matrix-sdk';
 import { PackAddress } from './PackAddress';
-import { PackImageReader } from './PackImageReader';
+import type { PackImageReader } from './PackImageReader';
 import { PackImagesReader } from './PackImagesReader';
 import { PackMetaReader } from './PackMetaReader';
-import { ImageUsage, PackContent } from './types';
+import type { PackContent } from './types';
+import { ImageUsage } from './types';
 
 export class ImagePack {
   public readonly id: string;
@@ -31,7 +32,7 @@ export class ImagePack {
     this.images = new PackImagesReader(content.images ?? {});
   }
 
-  static fromMatrixEvent(id: string, matrixEvent: MatrixEvent) {
+  static fromMatrixEvent(id: string, matrixEvent: MatrixEvent, legacyEvent?: MatrixEvent) {
     const roomId = matrixEvent.getRoomId();
     const stateKey = matrixEvent.getStateKey();
 
@@ -39,8 +40,16 @@ export class ImagePack {
       roomId && typeof stateKey === 'string' ? new PackAddress(roomId, stateKey) : undefined;
 
     const content = matrixEvent.getContent<PackContent>();
+    const legacyContent = legacyEvent?.getContent<PackContent>();
+    const mergedContent =
+      legacyContent && (content.pack !== undefined || content.images !== undefined)
+        ? {
+            pack: { ...legacyContent.pack, ...content.pack },
+            images: { ...legacyContent.images, ...content.images },
+          }
+        : content;
 
-    const imagePack: ImagePack = new ImagePack(id, content, address);
+    const imagePack: ImagePack = new ImagePack(id, mergedContent, address);
 
     return imagePack;
   }

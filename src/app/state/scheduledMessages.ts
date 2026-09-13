@@ -1,7 +1,10 @@
 import { atom } from 'jotai';
 import { atomFamily } from 'jotai/utils';
 
-export const delayedEventsSupportedAtom = atom<boolean>(false);
+export const delayedEventsSupportedAtom = atom(false);
+
+export const getScheduledMessageStateKey = (userId: string, roomId: string): string =>
+  `${userId}\0${roomId}`;
 
 export const roomIdToScheduledTimeAtomFamily = atomFamily<
   string,
@@ -14,3 +17,5 @@ export const roomIdToEditingScheduledDelayIdAtomFamily = atomFamily<
   string,
   ReturnType<typeof atom<string | null>>
 >(() => atom<string | null>(null));
+
+export const serverMaxDelayMsAtom = atom<number | null>(null);

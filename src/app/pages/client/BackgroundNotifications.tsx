@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useRef } from 'react';
+import type { MatrixClient, MatrixEvent, Room } from '$types/matrix-sdk';
 import {
   ClientEvent,
   createClient,
-  MatrixClient,
-  MatrixEvent,
+  IndexedDBStore,
   MatrixEventEvent,
-  Room,
   RoomEvent,
-  SyncState,
-  PushProcessor,
+  EventType,
 } from '$types/matrix-sdk';
+
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { fetch } from '$utils/fetch';
+import type { Session } from '$state/sessions';
 import {
   sessionsAtom,
   activeSessionIdAtom,
-  Session,
   pendingNotificationAtom,
   backgroundUnreadCountsAtom,
   inAppBannerAtom,
@@ -22,18 +22,18 @@ import {
 import { useSetting } from '$state/hooks/settings';
 import { settingsAtom } from '$state/settings';
 import { getMxIdLocalPart, mxcUrlToHttp } from '$utils/matrix';
+import { getAccountData, getStateEvent } from '$utils/room/hierarchy';
 import {
-  getMemberDisplayName,
   getNotificationType,
-  getStateEvent,
   isNotificationEvent,
   getMDirects,
   isDMRoom,
-} from '$utils/room';
-import { NotificationType, StateEvent } from '$types/matrix/room';
+} from '$utils/room/unread';
+import { getMemberDisplayName } from '$utils/room/display';
+import { NotificationType } from '$types/matrix/room';
 import { createLogger } from '$utils/debug';
 import { createDebugLogger } from '$utils/debugLogger';
-import LogoSVG from '$public/res/svg/cinny-logo.svg';
+import LogoSVG from '$public/res/svg/logo.svg';
 import { nicknamesAtom } from '$state/nicknames';
 import {
   buildRoomMessageNotification,
@@ -41,74 +41,87 @@ import {
 } from '$utils/notificationStyle';
 import * as Sentry from '@sentry/react';
 import { startClient, stopClient } from '$client/initMatrix';
-import { useClientConfig } from '$hooks/useClientConfig';
-import { mobileOrTablet } from '$utils/user-agent';
+import { createSessionTokenRefresher } from '$client/oidcTokenRefresher';
+import { hasServiceWorker, isDesktopTauri } from '$utils/platform';
+import { isMobileOrTablet } from '$utils/platform';
+import {
+  BACKGROUND_SYNC_POLL_TIMEOUT_MS,
+  isClientReadyForNotifications,
+  waitForSync,
+} from './backgroundNotificationSync';
 
 const log = createLogger('BackgroundNotifications');
 const debugLog = createDebugLogger('BackgroundNotifications');
-const isClientReadyForNotifications = (state: SyncState | string | null): boolean =>
-  state === SyncState.Prepared || state === SyncState.Syncing || state === SyncState.Catchup;
 
-const startBackgroundClient = async (
-  session: Session,
-  slidingSyncConfig: ReturnType<typeof useClientConfig>['slidingSync']
-): Promise<MatrixClient> => {
-  const mx = createClient({
-    baseUrl: session.baseUrl,
-    accessToken: session.accessToken,
-    userId: session.userId,
-    deviceId: session.deviceId,
-    timelineSupport: false,
-  });
-  await startClient(mx, {
-    baseUrl: session.baseUrl,
-    slidingSync: slidingSyncConfig,
-    sessionSlidingSyncOptIn: session.slidingSyncOptIn,
-  });
-  return mx;
+const BACKGROUND_STAGGER_DELAY_MS = 5_000;
+
+let desktopNotificationSeq = 1;
+const nextDesktopNotificationId = (): number => {
+  const id = desktopNotificationSeq;
+  desktopNotificationSeq = desktopNotificationSeq >= 2_000_000_000 ? 1 : desktopNotificationSeq + 1;
+  return id;
 };
 
-/**
- * Wait for the background client to finish its initial sync so that
- * push rules and account data are available before processing events.
- * Rejects after 30 seconds so callers can handle a stalled client instead
- * of blocking indefinitely.
- */
-const waitForSync = (mx: MatrixClient): Promise<void> =>
-  new Promise((resolve, reject) => {
-    const state = mx.getSyncState();
-    if (isClientReadyForNotifications(state)) {
-      resolve();
-      return;
-    }
-    let syncTimer: ReturnType<typeof setTimeout> | undefined;
-    const onSync = (newState: SyncState) => {
-      if (isClientReadyForNotifications(newState)) {
-        if (syncTimer !== undefined) clearTimeout(syncTimer);
-        mx.removeListener(ClientEvent.Sync, onSync);
-        resolve();
-      }
-    };
-    mx.on(ClientEvent.Sync, onSync);
-    syncTimer = setTimeout(() => {
-      mx.removeListener(ClientEvent.Sync, onSync);
-      reject(new Error('background client sync timed out'));
-    }, 30_000);
+const startBackgroundClient = async (session: Session): Promise<MatrixClient> => {
+  const storeName = {
+    sync: `bg-sync${session.userId}`,
+    crypto: `bg-crypto${session.userId}`,
+    rustCryptoPrefix: `bg-sync${session.userId}`,
+  };
+
+  const indexedDBStore = new IndexedDBStore({
+    indexedDB: global.indexedDB,
+    localStorage: global.localStorage,
+    dbName: storeName.sync,
   });
 
+  const tempClient = createClient({
+    baseUrl: session.baseUrl,
+    fetchFn: fetch,
+  });
+  const tokenRefresher = createSessionTokenRefresher(session, tempClient);
+
+  const mx = createClient({
+    baseUrl: session.baseUrl,
+    fetchFn: fetch,
+    accessToken: session.accessToken,
+    refreshToken: session.refreshToken,
+    userId: session.userId,
+    deviceId: session.deviceId,
+    store: indexedDBStore,
+    timelineSupport: false,
+    tokenRefreshFunction: tokenRefresher?.tokenRefreshFunction,
+  });
+
+  const startOpts = {
+    baseUrl: session.baseUrl,
+    sessionSlidingSyncOptIn: session.slidingSyncOptIn,
+    pollTimeoutMs: BACKGROUND_SYNC_POLL_TIMEOUT_MS,
+    timelineLimit: 1,
+  };
+
+  try {
+    await indexedDBStore.startup();
+    await startClient(mx, startOpts);
+    return mx;
+  } catch (error) {
+    stopClient(mx);
+    throw error;
+  }
+};
+
 export function BackgroundNotifications() {
-  const clientConfig = useClientConfig();
   const sessions = useAtomValue(sessionsAtom);
   const [activeSessionId, setActiveSessionId] = useAtom(activeSessionIdAtom);
   const [showNotifications] = useSetting(settingsAtom, 'useInAppNotifications');
-  const [usePushNotifications] = useSetting(settingsAtom, 'usePushNotifications');
+  const [backgroundPushEnabled] = useSetting(settingsAtom, 'backgroundPushEnabled');
   const [notificationSound] = useSetting(settingsAtom, 'isNotificationSounds');
   const [showMessageContent] = useSetting(settingsAtom, 'showMessageContentInNotifications');
   const [showEncryptedMessageContent] = useSetting(
     settingsAtom,
     'showMessageContentInEncryptedNotifications'
   );
-  const shouldRunBackgroundNotifications = showNotifications || usePushNotifications;
+  const shouldRunBackgroundNotifications = showNotifications || backgroundPushEnabled;
   const nicknames = useAtomValue(nicknamesAtom);
   const nicknamesRef = useRef(nicknames);
   nicknamesRef.current = nicknames;
@@ -121,8 +134,8 @@ export function BackgroundNotifications() {
   showMessageContentRef.current = showMessageContent;
   const showEncryptedMessageContentRef = useRef(showEncryptedMessageContent);
   showEncryptedMessageContentRef.current = showEncryptedMessageContent;
-  const clientsRef = useRef<Map<string, MatrixClient>>(new Map());
-  const notifiedEventsRef = useRef<Set<string>>(new Set());
+  const clientsRef = useRef(new Map());
+  const notifiedEventsRef = useRef(new Set());
   const setPending = useSetAtom(pendingNotificationAtom);
   const setBackgroundUnreads = useSetAtom(backgroundUnreadCountsAtom);
   const setInAppBanner = useSetAtom(inAppBannerAtom);
@@ -133,11 +146,13 @@ export function BackgroundNotifications() {
   setInAppBannerRef.current = setInAppBanner;
   // Per-client listener teardown callbacks, so we can explicitly remove event
   // listeners before stopping a background client.
-  const clientCleanupRef = useRef<Map<string, () => void>>(new Map());
+  const clientCleanupRef = useRef(new Map());
+
+  const activeUserId = activeSessionId ?? sessions[0]?.userId;
 
   const inactiveSessions = useMemo(
-    () => sessions.filter((s) => s.userId !== (activeSessionId ?? sessions[0]?.userId)),
-    [sessions, activeSessionId]
+    () => sessions.filter((s) => s.userId !== activeUserId),
+    [sessions, activeUserId]
   );
   // Ref so retry setTimeout callbacks can access the current session list
   // without stale closures.
@@ -149,7 +164,7 @@ export function BackgroundNotifications() {
     title: string;
     /** Body text. */
     body?: string;
-    /** URL to an icon (browser) – ignored on native where the app icon is used. */
+    /** URL to an icon (browser) â€“ ignored on native where the app icon is used. */
     icon?: string;
     /** Badge icon URL shown by supported platforms. */
     badge?: string;
@@ -170,14 +185,36 @@ export function BackgroundNotifications() {
     }
 
     const { current } = clientsRef;
+    let disposed = false;
+    const syncAbort = new AbortController();
     const activeIds = new Set(inactiveSessions.map((s) => s.userId));
+    const retryTimers: ReturnType<typeof setTimeout>[] = [];
 
     async function sendNotification(opts: NotifyOptions): Promise<void> {
+      if (isDesktopTauri()) {
+        try {
+          const { getTauriNotificationsApi, buildNotificationExtra } =
+            await import('$features/settings/notifications/TauriNotificationsApiClient');
+          const api = await getTauriNotificationsApi();
+          // Attach routing payload so the tap deep-links via NativeNotificationClickRouting.
+          await api.sendNotification({
+            id: nextDesktopNotificationId(),
+            title: opts.title,
+            body: opts.body,
+            silent: opts.silent ?? false,
+            extra: buildNotificationExtra(opts.data),
+          });
+          return;
+        } catch (err) {
+          log.error('failed to show native desktop notification', err);
+          // Fall through to the web Notification path as a best-effort fallback.
+        }
+      }
       // Prefer ServiceWorkerRegistration.showNotification so that taps are handled
       // by the SW notificationclick event. This routes through HandleNotificationClick
       // (postMessage path) which does the account switch + deep link reliably on all
       // platforms including iOS where window.Notification onclick is not fired.
-      if ('serviceWorker' in navigator) {
+      if (hasServiceWorker()) {
         try {
           const reg = await navigator.serviceWorker.ready;
           await reg.showNotification(opts.title, {
@@ -193,18 +230,22 @@ export function BackgroundNotifications() {
         }
       }
       if ('Notification' in window && window.Notification.permission === 'granted') {
-        const noti = new window.Notification(opts.title, {
-          icon: opts.icon,
-          badge: opts.badge,
-          body: opts.body,
-          silent: opts.silent ?? false,
-          data: opts.data,
-        });
-        if (opts.onClick) {
-          noti.onclick = () => {
-            opts.onClick?.();
-            noti.close();
-          };
+        try {
+          const noti = new window.Notification(opts.title, {
+            icon: opts.icon,
+            badge: opts.badge,
+            body: opts.body,
+            silent: opts.silent ?? false,
+            data: opts.data,
+          });
+          if (opts.onClick) {
+            noti.addEventListener('click', () => {
+              opts.onClick?.();
+              noti.close();
+            });
+          }
+        } catch (err) {
+          debugLog.error('notification', 'Failed to show a background OS notification', err);
         }
       }
     }
@@ -229,49 +270,64 @@ export function BackgroundNotifications() {
     // Using a named function (vs. inline .then) lets the .catch() schedule a
     // fresh retry referencing the latest session from inactiveSessionsRef.
     const startSession = (session: Session, attempt = 0): void => {
+      if (disposed || current.has(session.userId)) return;
+
       let sessionMx: MatrixClient | undefined;
-      startBackgroundClient(session, clientConfig.slidingSync)
+      startBackgroundClient(session)
         .then(async (mx) => {
           sessionMx = mx;
+          if (disposed) {
+            stopClient(mx);
+            return;
+          }
           current.set(session.userId, mx);
           Sentry.metrics.gauge('sable.background.client_count', current.size);
 
-          await waitForSync(mx);
+          await waitForSync(mx, syncAbort.signal);
+
+          if (disposed) return;
+          if (current.get(session.userId) !== mx) {
+            stopClient(mx);
+            return;
+          }
 
           // Wait for m.direct account data to load. This is critical for DM detection.
           // Without it, rooms in /direct/ won't be recognized as DMs, causing notifications to fail.
           let mDirectsSet: Set<string> | undefined;
-          const mDirectEvent = mx.getAccountData('m.direct' as any);
+          const mDirectEvent = getAccountData(mx, EventType.Direct);
           if (mDirectEvent) {
             mDirectsSet = getMDirects(mDirectEvent);
           } else {
-            // Account data not loaded yet; wait for it
             await new Promise<void>((resolve) => {
               const handler = (event: MatrixEvent) => {
-                if (event.getType() === 'm.direct') {
+                if (event.getType() === (EventType.Direct as string)) {
                   mDirectsSet = getMDirects(event);
-                  mx.off(ClientEvent.AccountData as any, handler);
+                  mx.off(ClientEvent.AccountData, handler);
                   resolve();
                 }
               };
-              mx.on(ClientEvent.AccountData as any, handler);
-              // Timeout after 5s to avoid blocking forever if m.direct never arrives
+              mx.on(ClientEvent.AccountData, handler);
               setTimeout(() => {
-                mx.off(ClientEvent.AccountData as any, handler);
+                mx.off(ClientEvent.AccountData, handler);
                 resolve();
               }, 5000);
             });
           }
 
-          const pushProcessor = new PushProcessor(mx);
+          if (disposed) return;
+          if (current.get(session.userId) !== mx) {
+            stopClient(mx);
+            return;
+          }
 
-          // Keep mDirectsSet updated when m.direct account data changes
+          const pushProcessor = mx.pushProcessor;
+
           const handleAccountData = (event: MatrixEvent) => {
-            if (event.getType() === 'm.direct') {
+            if (event.getType() === (EventType.Direct as string)) {
               mDirectsSet = getMDirects(event);
             }
           };
-          mx.on(ClientEvent.AccountData as any, handleAccountData);
+          mx.on(ClientEvent.AccountData, handleAccountData);
 
           // Track encrypted events that are being decrypted to avoid re-checking the
           // encryption guard when the Decrypted callback fires.
@@ -280,8 +336,8 @@ export function BackgroundNotifications() {
           const handleTimeline = (
             mEvent: MatrixEvent,
             room: Room | undefined,
-            toStartOfTimeline: boolean | undefined,
-            removed: boolean,
+            _toStartOfTimeline: boolean | undefined,
+            _removed: boolean,
             data: { liveEvent: boolean }
           ) => {
             if (!isClientReadyForNotifications(mx.getSyncState())) return;
@@ -293,7 +349,7 @@ export function BackgroundNotifications() {
             if (!eventId) return;
 
             const eventType = mEvent.getType();
-            const isEncryptedType = eventType === 'm.room.encrypted';
+            const isEncryptedType = eventType === (EventType.RoomMessageEncrypted as string);
 
             // For encrypted events that haven't been decrypted yet, wait for decryption
             // before processing the notification. The SDK's Timeline re-emission after
@@ -309,7 +365,9 @@ export function BackgroundNotifications() {
               const handleDecrypted = () => {
                 // After decryption, run the notification logic with the decrypted event.
                 // Force liveEvent=true since the SDK's re-emission sets it to false.
-                handleTimeline(mEvent, room, toStartOfTimeline, removed, { liveEvent: true });
+                handleTimeline(mEvent, room, true, false, {
+                  liveEvent: true,
+                });
                 // Clean up the tracking flag
                 decryptingEvents.delete(eventId);
               };
@@ -412,7 +470,7 @@ export function BackgroundNotifications() {
               return;
             }
 
-            const isEncryptedRoom = !!getStateEvent(room, StateEvent.RoomEncryption);
+            const isEncryptedRoom = !!getStateEvent(room, EventType.RoomEncryption);
 
             notifiedEventsRef.current.add(dedupeId);
             // Cap the set so it doesn't grow unbounded
@@ -446,19 +504,23 @@ export function BackgroundNotifications() {
 
             const notifOnClick = () => {
               window.focus();
-              // Always switch to the background account – jotai ignores no-op updates
+              // Always switch to the background account â€“ jotai ignores no-op updates
               setActiveSessionId(session.userId);
-              setPending({ roomId: room.roomId, eventId, targetSessionId: session.userId });
+              setPending({
+                roomId: room.roomId,
+                eventId,
+                targetSessionId: session.userId,
+              });
             };
 
             // Show in-app banner when app is visible, mobile, and in-app notifications enabled
             const canShowInAppBanner =
               document.visibilityState === 'visible' &&
-              mobileOrTablet() &&
+              isMobileOrTablet() &&
               showNotificationsRef.current;
 
             if (canShowInAppBanner) {
-              // App is in the foreground on a different account — show the themed in-app banner.
+              // App is in the foreground on a different account â€” show the themed in-app banner.
               debugLog.info('notification', 'Showing in-app banner', {
                 eventId,
                 roomId: room.roomId,
@@ -470,11 +532,13 @@ export function BackgroundNotifications() {
                 roomName: room.name ?? room.getCanonicalAlias() ?? undefined,
                 senderName,
                 body: notificationPayload.options.body,
+                room,
+                event: mEvent,
                 icon: notificationPayload.options.icon,
                 onClick: notifOnClick,
               });
             } else if (loudByRule) {
-              // App is backgrounded or in-app notifications disabled — fire an OS notification.
+              // App is backgrounded or in-app notifications disabled â€” fire an OS notification.
               // Only send for loud (sound-tweak) rules; highlight-only events are silently counted.
               debugLog.info('notification', 'Sending OS notification', {
                 eventId,
@@ -490,6 +554,8 @@ export function BackgroundNotifications() {
                 silent: notificationPayload.options.silent ?? undefined,
                 data: notificationPayload.options.data,
                 onClick: notifOnClick,
+              }).catch((err: unknown) => {
+                debugLog.error('notification', 'Failed to send a background OS notification', err);
               });
             }
           };
@@ -498,17 +564,14 @@ export function BackgroundNotifications() {
 
           // Register teardown so these listeners are removed when this client is stopped.
           clientCleanupRef.current.set(session.userId, () => {
-            mx.off(ClientEvent.AccountData as any, handleAccountData);
+            mx.off(ClientEvent.AccountData, handleAccountData);
             mx.off(RoomEvent.Timeline, handleTimeline as unknown as (...args: unknown[]) => void);
           });
         })
         .catch((err) => {
+          if (disposed) return;
           log.error('failed to start background client for', session.userId, err);
-          debugLog.error('notification', 'Failed to start background client', {
-            userId: session.userId,
-            error: err,
-          });
-          Sentry.captureException(err, { tags: { component: 'BackgroundNotifications' } });
+          debugLog.error('notification', 'Failed to start background client', err);
 
           // Remove the stuck/failed client from current so future runs (or the
           // retry below) can attempt a fresh start.
@@ -522,36 +585,47 @@ export function BackgroundNotifications() {
           // Retry with exponential backoff, up to 5 attempts (5s, 10s, 20s, 40s, 60s cap).
           if (attempt < 5) {
             const retryDelay = Math.min(5_000 * 2 ** attempt, 60_000);
-            setTimeout(() => {
-              const latestSession = inactiveSessionsRef.current.find(
-                (s) => s.userId === session.userId
-              );
-              if (latestSession && !current.has(session.userId)) {
-                startSession(latestSession, attempt + 1);
-              }
-            }, retryDelay);
+            retryTimers.push(
+              setTimeout(() => {
+                if (disposed) return;
+                const latestSession = inactiveSessionsRef.current.find(
+                  (s) => s.userId === session.userId
+                );
+                if (latestSession && !current.has(session.userId)) {
+                  startSession(latestSession, attempt + 1);
+                }
+              }, retryDelay)
+            );
           }
         });
     };
 
-    inactiveSessions.forEach((session) => {
-      if (!current.has(session.userId)) startSession(session);
+    const pendingSessions = inactiveSessions.filter((s) => !current.has(s.userId));
+    const staggerTimers: ReturnType<typeof setTimeout>[] = [];
+    pendingSessions.forEach((session, idx) => {
+      if (idx === 0) {
+        startSession(session);
+      } else {
+        staggerTimers.push(
+          setTimeout(() => startSession(session), idx * BACKGROUND_STAGGER_DELAY_MS)
+        );
+      }
     });
 
+    const cleanupMap = clientCleanupRef.current;
     return () => {
-      // Reading ref.current in cleanup is intentional - we want cleanup functions
-      // that were registered during async startBackgroundClient operations
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      const cleanupMap = clientCleanupRef.current;
+      disposed = true;
+      syncAbort.abort();
+      staggerTimers.forEach(clearTimeout);
+      retryTimers.forEach(clearTimeout);
       current.forEach((mx, userId) => {
         cleanupMap.get(userId)?.();
         cleanupMap.delete(userId);
         stopClient(mx);
+        current.delete(userId);
       });
-      current.clear();
     };
   }, [
-    clientConfig.slidingSync,
     inactiveSessions,
     shouldRunBackgroundNotifications,
     setActiveSessionId,

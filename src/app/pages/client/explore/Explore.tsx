@@ -1,38 +1,51 @@
-import { FormEventHandler, useCallback, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import FocusTrap from 'focus-trap-react';
+import type { FormEventHandler, MouseEventHandler } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
+import { Avatar, Box, Button, Dialog, Header, IconButton, Input, Text, color, config } from 'folds';
 import {
-  Avatar,
-  Box,
-  Button,
-  Dialog,
-  Header,
-  Icon,
-  IconButton,
-  Icons,
-  Input,
-  Overlay,
-  OverlayBackdrop,
-  OverlayCenter,
-  Text,
-  color,
-  config,
-} from 'folds';
-import { NavCategory, NavCategoryHeader, NavItem, NavItemContent, NavLink } from '$components/nav';
+  Compass,
+  HardDrives,
+  Lightbulb,
+  Plus,
+  Trash,
+  X,
+  composerIcon,
+  sizedIcon,
+  menuIcon,
+} from '$components/icons/phosphor';
+import {
+  NavCategory,
+  NavCategoryHeader,
+  NavItem,
+  NavItemContent,
+  NavItemOptions,
+  NavLink,
+} from '$components/nav';
 import { getExploreFeaturedPath, getExploreServerPath } from '$pages/pathUtils';
 import { useClientConfig } from '$hooks/useClientConfig';
-import { useExploreFeaturedSelected, useExploreServer } from '$hooks/router/useExploreSelected';
+import { useExploreFeaturedSelected, useExploreServer } from '$hooks/router/useRouteSelected';
+import { useExploreServers } from '$hooks/useExploreServers';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { getMxIdServer } from '$utils/matrix';
-import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
+import { useAsyncCallback } from '$hooks/useAsyncCallback';
+import { AsyncError } from '$components/AsyncError';
 import { useNavToActivePathMapper } from '$hooks/useNavToActivePathMapper';
-import { PageNav, PageNavContent, PageNavHeader } from '$components/page';
-import { stopPropagation } from '$utils/keyboard';
+import { PageNavContent, PageNavHeader } from '$components/page';
+import { PageNavShell } from '$components/page/PageNavShell';
+import { useSidebarWidth } from '$hooks/useSidebarWidth';
+import { getMxIdServer } from '$utils/mxIdHelper';
+import { isServerName } from '$utils/matrix';
+import { ModalOverlay } from '$components/modal-overlay/ModalOverlay';
 
-export function AddServer() {
+type AddServerProps = {
+  hideText?: boolean;
+  onAddServer: (server: string) => Promise<boolean>;
+};
+
+function AddServer({ hideText, onAddServer }: AddServerProps) {
   const mx = useMatrixClient();
   const navigate = useNavigate();
   const [dialog, setDialog] = useState(false);
+  const [serverError, setServerError] = useState<string>();
   const serverInputRef = useRef<HTMLInputElement>(null);
 
   const [exploreState] = useAsyncCallback(
@@ -46,70 +59,78 @@ export function AddServer() {
     return server || undefined;
   };
 
+  const addAndNavigate = useCallback(
+    async (server: string) => {
+      if (!isServerName(server)) {
+        setServerError('Invalid server name.');
+        return;
+      }
+
+      setServerError(undefined);
+      const added = await onAddServer(server);
+      if (!added) {
+        setServerError('Failed to save server. Please try again.');
+        return;
+      }
+
+      navigate(getExploreServerPath(server));
+      setDialog(false);
+    },
+    [navigate, onAddServer]
+  );
+
   const handleSubmit: FormEventHandler<HTMLFormElement> = (evt) => {
     evt.preventDefault();
     const server = getInputServer();
     if (!server) return;
-    // explore(server);
-
-    navigate(getExploreServerPath(server));
-    setDialog(false);
-  };
-
-  const handleView = () => {
-    const server = getInputServer();
-    if (!server) return;
-    navigate(getExploreServerPath(server));
-    setDialog(false);
+    addAndNavigate(server).catch(() => {
+      setServerError('Failed to save server. Please try again.');
+    });
   };
 
   return (
     <>
-      <Overlay open={dialog} backdrop={<OverlayBackdrop />}>
-        <OverlayCenter>
-          <FocusTrap
-            focusTrapOptions={{
-              initialFocus: false,
-              clickOutsideDeactivates: true,
-              onDeactivate: () => setDialog(false),
-              escapeDeactivates: stopPropagation,
+      <ModalOverlay open={dialog} requestClose={() => setDialog(false)}>
+        <Dialog variant="Surface">
+          <Header
+            style={{
+              padding: `0 ${config.space.S200} 0 ${config.space.S400}`,
+              borderBottomWidth: config.borderWidth.B300,
             }}
+            variant="Surface"
+            size="500"
           >
-            <Dialog variant="Surface">
-              <Header
-                style={{
-                  padding: `0 ${config.space.S200} 0 ${config.space.S400}`,
-                  borderBottomWidth: config.borderWidth.B300,
-                }}
-                variant="Surface"
-                size="500"
-              >
-                <Box grow="Yes">
-                  <Text size="H4">Add Server</Text>
-                </Box>
-                <IconButton size="300" onClick={() => setDialog(false)} radii="300">
-                  <Icon src={Icons.Cross} />
-                </IconButton>
-              </Header>
-              <Box
-                as="form"
-                onSubmit={handleSubmit}
-                style={{ padding: config.space.S400 }}
-                direction="Column"
-                gap="400"
-              >
-                <Text priority="400">Add server name to explore public communities.</Text>
-                <Box direction="Column" gap="100">
-                  <Text size="L400">Server Name</Text>
-                  <Input ref={serverInputRef} name="serverInput" variant="Background" required />
-                  {exploreState.status === AsyncStatus.Error && (
-                    <Text style={{ color: color.Critical.Main }} size="T300">
-                      Failed to load public rooms. Please try again.
-                    </Text>
-                  )}
-                </Box>
-                <Box direction="Column" gap="200">
-                  {/* <Button
+            <Box grow="Yes">
+              <Text size="H4">Add Server</Text>
+            </Box>
+            <IconButton size="300" onClick={() => setDialog(false)} radii="300">
+              {composerIcon(X)}
+            </IconButton>
+          </Header>
+          <Box
+            as="form"
+            onSubmit={handleSubmit}
+            style={{ padding: config.space.S400 }}
+            direction="Column"
+            gap="400"
+          >
+            <Text priority="400">Add server name to explore public communities.</Text>
+            <Box direction="Column" gap="100">
+              <Text size="L400">Server Name</Text>
+              <Input ref={serverInputRef} name="serverInput" variant="Background" required />
+              {serverError && (
+                <Text style={{ color: color.Critical.Main }} size="T300">
+                  {serverError}
+                </Text>
+              )}
+              <AsyncError
+                state={exploreState}
+                prefix="Failed to load public rooms. Please try again"
+                size="T300"
+              />
+            </Box>
+            <Box direction="Column" gap="200">
+              {/* <Button
                     type="submit"
                     variant="Secondary"
                     before={
@@ -122,54 +143,126 @@ export function AddServer() {
                     <Text size="B400">Save</Text>
                   </Button> */}
 
-                  <Button type="submit" onClick={handleView} variant="Secondary" fill="Soft">
-                    <Text size="B400">View</Text>
-                  </Button>
-                </Box>
-              </Box>
-            </Dialog>
-          </FocusTrap>
-        </OverlayCenter>
-      </Overlay>
-      <Button
-        variant="Secondary"
-        fill="Soft"
-        size="300"
-        before={<Icon size="100" src={Icons.Plus} />}
-        onClick={() => setDialog(true)}
-      >
-        <Text size="B300" truncate>
-          Add Server
-        </Text>
-      </Button>
+              <Button type="submit" variant="Secondary" fill="Soft">
+                <Text size="B400">Add</Text>
+              </Button>
+            </Box>
+          </Box>
+        </Dialog>
+      </ModalOverlay>
+      {!hideText ? (
+        <Button
+          variant="Secondary"
+          fill="Soft"
+          size="300"
+          before={menuIcon(Plus)}
+          onClick={() => setDialog(true)}
+        >
+          <Text size="B300" truncate>
+            Add Server
+          </Text>
+        </Button>
+      ) : (
+        <IconButton aria-pressed variant="Background" onClick={() => setDialog(true)}>
+          {sizedIcon(Plus, '200', { filled: true })}
+        </IconButton>
+      )}
     </>
   );
 }
 
 export function Explore() {
   const mx = useMatrixClient();
+  const navigate = useNavigate();
   useNavToActivePathMapper('explore');
   const userId = mx.getUserId();
   const clientConfig = useClientConfig();
+  const { servers: addedServers, addServer, removeServer } = useExploreServers();
   const userServer = userId ? getMxIdServer(userId) : undefined;
-  const servers =
-    clientConfig.featuredCommunities?.servers?.filter((server) => server !== userServer) ?? [];
+  const featuredCommunityServers = clientConfig.featuredCommunities?.servers;
+  const servers = useMemo(() => {
+    const featuredServers =
+      featuredCommunityServers?.filter((server) => server !== userServer) ?? [];
+    const seen = new Set<string>();
+    const merged: string[] = [];
+
+    [...featuredServers, ...addedServers].forEach((server) => {
+      if (server === userServer) return;
+      const key = server.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(server);
+    });
+
+    return merged;
+  }, [featuredCommunityServers, addedServers, userServer]);
 
   const featuredSelected = useExploreFeaturedSelected();
   const selectedServer = useExploreServer();
 
-  return (
-    <PageNav>
-      <PageNavHeader>
-        <Box grow="Yes" gap="300">
-          <Box grow="Yes">
-            <Text size="H4" truncate>
-              Explore Community
-            </Text>
-          </Box>
-        </Box>
-      </PageNavHeader>
+  const isUserAddedServer = useCallback(
+    (server: string) => addedServers.some((entry) => entry.toLowerCase() === server.toLowerCase()),
+    [addedServers]
+  );
 
+  const handleRemoveServer = useCallback(
+    (server: string) => {
+      removeServer(server)
+        .then((removed) => {
+          if (!removed) return;
+          if (selectedServer?.toLowerCase() === server.toLowerCase()) {
+            navigate(getExploreFeaturedPath());
+          }
+        })
+        .catch(() => undefined);
+    },
+    [navigate, removeServer, selectedServer]
+  );
+
+  const handleRemoveServerClick =
+    (server: string): MouseEventHandler<HTMLButtonElement> =>
+    (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      handleRemoveServer(server);
+    };
+
+  const {
+    curWidth,
+    setCurWidth,
+    roomSidebarWidth,
+    setRoomSidebarWidth,
+    setIsResizingSidebar,
+    isMobile,
+    hideText,
+    oldSidebar,
+  } = useSidebarWidth();
+
+  return (
+    <PageNavShell
+      header={
+        <PageNavHeader size="600">
+          <Box grow="Yes" gap="300" justifyContent="Center">
+            {!hideText ? (
+              <Box grow="Yes">
+                <Text size="H4" truncate>
+                  Explore Community
+                </Text>
+              </Box>
+            ) : (
+              sizedIcon(Compass, '200', { filled: true })
+            )}
+          </Box>
+        </PageNavHeader>
+      }
+      curWidth={curWidth}
+      setCurWidth={setCurWidth}
+      roomSidebarWidth={roomSidebarWidth}
+      setRoomSidebarWidth={setRoomSidebarWidth}
+      setIsResizingSidebar={setIsResizingSidebar}
+      isMobile={isMobile}
+      oldSidebar={oldSidebar}
+    >
       <PageNavContent>
         <Box direction="Column" gap="300">
           <NavCategory>
@@ -177,14 +270,20 @@ export function Explore() {
               <NavLink to={getExploreFeaturedPath()}>
                 <NavItemContent>
                   <Box as="span" grow="Yes" alignItems="Center" gap="200">
-                    <Avatar size="200" radii="400">
-                      <Icon src={Icons.Bulb} size="100" filled={featuredSelected} />
+                    <Avatar
+                      size="200"
+                      radii="400"
+                      style={hideText ? { width: '100%', padding: '0' } : { height: '100%' }}
+                    >
+                      {sizedIcon(Lightbulb, '100', { filled: featuredSelected })}
                     </Avatar>
-                    <Box as="span" grow="Yes">
-                      <Text as="span" size="Inherit" truncate>
-                        Featured
-                      </Text>
-                    </Box>
+                    {!hideText && (
+                      <Box as="span" grow="Yes">
+                        <Text as="span" size="Inherit" truncate>
+                          Featured
+                        </Text>
+                      </Box>
+                    )}
                   </Box>
                 </NavItemContent>
               </NavLink>
@@ -198,18 +297,20 @@ export function Explore() {
                 <NavLink to={getExploreServerPath(userServer)}>
                   <NavItemContent>
                     <Box as="span" grow="Yes" alignItems="Center" gap="200">
-                      <Avatar size="200" radii="400">
-                        <Icon
-                          src={Icons.Server}
-                          size="100"
-                          filled={selectedServer === userServer}
-                        />
+                      <Avatar
+                        size="200"
+                        radii="400"
+                        style={hideText ? { width: '100%', padding: '0' } : { height: '100%' }}
+                      >
+                        {sizedIcon(HardDrives, '100', { filled: selectedServer === userServer })}
                       </Avatar>
-                      <Box as="span" grow="Yes">
-                        <Text as="span" size="Inherit" truncate>
-                          {userServer}
-                        </Text>
-                      </Box>
+                      {!hideText && (
+                        <Box as="span" grow="Yes">
+                          <Text as="span" size="Inherit" truncate>
+                            {userServer}
+                          </Text>
+                        </Box>
+                      )}
                     </Box>
                   </NavItemContent>
                 </NavLink>
@@ -219,9 +320,11 @@ export function Explore() {
           {servers.length > 0 && (
             <NavCategory>
               <NavCategoryHeader>
-                <Text size="O400" style={{ paddingLeft: config.space.S200 }}>
-                  Servers
-                </Text>
+                {!hideText && (
+                  <Text size="O400" style={{ paddingLeft: config.space.S200 }}>
+                    Servers
+                  </Text>
+                )}
               </NavCategoryHeader>
               {servers.map((server) => (
                 <NavItem
@@ -233,26 +336,46 @@ export function Explore() {
                   <NavLink to={getExploreServerPath(server)}>
                     <NavItemContent>
                       <Box as="span" grow="Yes" alignItems="Center" gap="200">
-                        <Avatar size="200" radii="400">
-                          <Icon src={Icons.Server} size="100" filled={server === selectedServer} />
+                        <Avatar
+                          size="200"
+                          radii="400"
+                          style={hideText ? { width: '100%', padding: '0' } : { height: '100%' }}
+                        >
+                          {sizedIcon(HardDrives, '100', { filled: server === selectedServer })}
                         </Avatar>
-                        <Box as="span" grow="Yes">
-                          <Text as="span" size="Inherit" truncate>
-                            {server}
-                          </Text>
-                        </Box>
+                        {!hideText && (
+                          <Box as="span" grow="Yes">
+                            <Text as="span" size="Inherit" truncate>
+                              {server}
+                            </Text>
+                          </Box>
+                        )}
                       </Box>
                     </NavItemContent>
                   </NavLink>
+                  {!hideText && isUserAddedServer(server) && (
+                    <NavItemOptions>
+                      <IconButton
+                        size="300"
+                        variant="Critical"
+                        fill="None"
+                        radii="300"
+                        aria-label={`Remove ${server}`}
+                        onClick={handleRemoveServerClick(server)}
+                      >
+                        {menuIcon(Trash)}
+                      </IconButton>
+                    </NavItemOptions>
+                  )}
                 </NavItem>
               ))}
             </NavCategory>
           )}
           <Box direction="Column">
-            <AddServer />
+            <AddServer hideText={hideText} onAddServer={addServer} />
           </Box>
         </Box>
       </PageNavContent>
-    </PageNav>
+    </PageNavShell>
   );
 }

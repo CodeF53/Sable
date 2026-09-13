@@ -1,13 +1,16 @@
-/* eslint-disable jsx-a11y/media-has-caption */
-import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Chip, Icon, IconButton, Icons, ProgressBar, Spinner, Text, toRem } from 'folds';
-import { EncryptedAttachmentInfo } from 'browser-encrypt-attachment';
+/* oxlint-disable jsx-a11y/media-has-caption */
+import type { ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Badge, Chip, IconButton, ProgressBar, Spinner, Text, toRem } from 'folds';
+import { sizedIcon, Pause, Play, SpeakerHigh, SpeakerSlash } from '$components/icons/phosphor';
+import { isTauri } from '@tauri-apps/api/core';
+import type { EncryptedAttachmentInfo } from 'browser-encrypt-attachment';
 import { Range } from 'react-range';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
-import { IAudioInfo } from '$types/matrix/common';
+import type { IAudioInfo } from '$types/matrix/common';
+import type { PlayTimeCallback } from '$hooks/media';
 import {
-  PlayTimeCallback,
   useMediaLoading,
   useMediaPlay,
   useMediaPlayTimeCallback,
@@ -16,9 +19,19 @@ import {
 } from '$hooks/media';
 import { useThrottle } from '$hooks/useThrottle';
 import { secondsToMinutesAndSeconds } from '$utils/common';
-import { decryptFile, downloadEncryptedMedia, downloadMedia, mxcUrlToHttp } from '$utils/matrix';
+import {
+  decryptFile,
+  downloadEncryptedMedia,
+  downloadMedia,
+  mxcUrlToHttp,
+  rewriteAuthenticatedMediaUrl,
+} from '$utils/matrix';
+import { prepareLoopbackMedia } from '$utils/mediaUrl';
+import { setMediaEncryption } from '$utils/tauriMediaEncryption';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
+import { useCreateObjectURL } from '$hooks/useObjectURL';
 import { MEDIA_VOLUME_KEY } from '$components/media';
+import { hasControllingServiceWorker } from '$utils/platform';
 
 const PLAY_TIME_THROTTLE_OPS = {
   wait: 500,
@@ -48,15 +61,27 @@ export function AudioContent({
   const mx = useMatrixClient();
   const useAuthentication = useMediaAuthentication();
 
+  const createObjectURL = useCreateObjectURL();
+
   const [srcState, loadSrc] = useAsyncCallback(
     useCallback(async () => {
       const mediaUrl = mxcUrlToHttp(mx, url, useAuthentication);
       if (!mediaUrl) throw new Error('Invalid media URL');
-      const fileContent = encInfo
-        ? await downloadEncryptedMedia(mediaUrl, (encBuf) => decryptFile(encBuf, mimeType, encInfo))
-        : await downloadMedia(mediaUrl);
-      return URL.createObjectURL(fileContent);
-    }, [mx, url, useAuthentication, mimeType, encInfo])
+      // mxcUrlToHttp already returned a `sable-media` URL under Tauri.
+      if (!encInfo && isTauri()) return prepareLoopbackMedia(mediaUrl);
+      // Service-worker-authenticated browser media can stream with Range requests.
+      if (!encInfo && hasControllingServiceWorker()) return mediaUrl;
+      if (encInfo) {
+        if (isTauri()) {
+          await setMediaEncryption(mediaUrl, encInfo, mimeType);
+          return prepareLoopbackMedia(rewriteAuthenticatedMediaUrl(mediaUrl)!);
+        }
+        return createObjectURL(
+          downloadEncryptedMedia(mediaUrl, (encBuf) => decryptFile(encBuf, mimeType, encInfo))
+        );
+      }
+      return createObjectURL(downloadMedia(mediaUrl));
+    }, [mx, url, useAuthentication, mimeType, encInfo, createObjectURL])
   );
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -71,8 +96,10 @@ export function AudioContent({
 
   const [currentTime, setCurrentTime] = useState(0);
   // duration in seconds. (NOTE: info.duration is in milliseconds)
-  const infoDuration = info.duration ?? 0;
-  const [duration, setDuration] = useState((infoDuration >= 0 ? infoDuration : 0) / 1000);
+  const infoDurationMs = info.duration ?? 0;
+  const initialDurationSec =
+    Number.isFinite(infoDurationMs) && infoDurationMs > 0 ? infoDurationMs / 1000 : 0;
+  const [duration, setDuration] = useState(initialDurationSec);
 
   const getAudioRef = useCallback(() => audioRef.current, []);
   const { loading } = useMediaLoading(getAudioRef);
@@ -80,9 +107,15 @@ export function AudioContent({
   const { seek } = useMediaSeek(getAudioRef);
   const { volume, mute, setMute, setVolume } = useMediaVolume(getAudioRef);
   const handlePlayTimeCallback: PlayTimeCallback = useCallback((d, ct) => {
-    setDuration(d);
-    setCurrentTime(ct);
+    if (Number.isFinite(d) && d > 0) setDuration(d);
+    if (Number.isFinite(ct) && ct >= 0) setCurrentTime(ct);
   }, []);
+
+  const trackMax = duration > 0 ? duration : 1;
+  const trackTime =
+    duration > 0 ? Math.min(Number.isFinite(currentTime) ? currentTime : 0, duration) : 0;
+  const displayDuration = duration > 0 ? duration : 0;
+  const displayCurrentTime = Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0;
   useMediaPlayTimeCallback(
     getAudioRef,
     useThrottle(handlePlayTimeCallback, PLAY_TIME_THROTTLE_OPS)
@@ -92,7 +125,7 @@ export function AudioContent({
     if (srcState.status === AsyncStatus.Success) {
       setPlaying(!playing);
     } else if (srcState.status !== AsyncStatus.Loading) {
-      loadSrc();
+      loadSrc().catch(() => undefined);
     }
   };
 
@@ -101,11 +134,19 @@ export function AudioContent({
       <Range
         step={1}
         min={0}
-        max={duration || 1}
-        values={[currentTime]}
-        onChange={(values) => seek(values[0])}
+        max={trackMax}
+        values={[trackTime]}
+        onChange={(values) => {
+          if (!(duration > 0)) return;
+          const next = values[0] ?? 0;
+          if (!Number.isFinite(next)) return;
+          seek(Math.max(0, Math.min(next, duration)));
+        }}
         renderTrack={(params) => {
-          const { key, ...restProps } = params.props as any;
+          const { key, ...restProps } = params.props as unknown as {
+            key?: string;
+            [key: string]: unknown;
+          };
           return (
             <div key={key} {...restProps}>
               {params.children}
@@ -114,26 +155,30 @@ export function AudioContent({
                 variant="Secondary"
                 size="300"
                 min={0}
-                max={duration}
-                value={currentTime}
+                max={trackMax}
+                value={trackTime}
                 radii="300"
               />
             </div>
           );
         }}
         renderThumb={(params) => {
-          const { key, style, ...restProps } = params.props as any;
+          const { key, style, ...restProps } = params.props as unknown as {
+            key?: unknown;
+            style?: Record<string, unknown>;
+            [key: string]: unknown;
+          };
           return (
             <Badge
-              key={key}
+              key={String(key)}
               size="300"
               variant="Secondary"
               fill="Solid"
               radii="Pill"
               outlined
-              {...restProps}
+              {...(restProps as Record<string, unknown>)}
               style={{
-                ...style,
+                ...(style as Record<string, unknown>),
                 zIndex: 0,
               }}
             />
@@ -152,7 +197,7 @@ export function AudioContent({
             srcState.status === AsyncStatus.Loading || loading ? (
               <Spinner variant="Secondary" size="50" />
             ) : (
-              <Icon src={playing ? Icons.Pause : Icons.Play} size="50" filled={playing} />
+              sizedIcon(playing ? Pause : Play, '50', { filled: playing })
             )
           }
         >
@@ -160,8 +205,8 @@ export function AudioContent({
         </Chip>
 
         <Text size="T200">{`${secondsToMinutesAndSeconds(
-          currentTime
-        )} / ${secondsToMinutesAndSeconds(duration)}`}</Text>
+          displayCurrentTime
+        )} / ${secondsToMinutesAndSeconds(displayDuration)}`}</Text>
       </>
     ),
     rightControl: (
@@ -173,16 +218,19 @@ export function AudioContent({
           onClick={() => setMute(!mute)}
           aria-pressed={mute}
         >
-          <Icon src={mute ? Icons.VolumeMute : Icons.VolumeHigh} size="50" />
+          {sizedIcon(mute ? SpeakerSlash : SpeakerHigh, '50')}
         </IconButton>
         <Range
           step={0.1}
           min={0}
           max={1}
           values={[volume]}
-          onChange={(values) => setVolume(values[0])}
+          onChange={(values) => setVolume(values[0] ?? 1)}
           renderTrack={(params) => {
-            const { key, ...restProps } = params.props as any;
+            const { key, ...restProps } = params.props as unknown as {
+              key?: string;
+              [key: string]: unknown;
+            };
             return (
               <div key={key} {...restProps}>
                 {params.children}
@@ -199,18 +247,22 @@ export function AudioContent({
             );
           }}
           renderThumb={(params) => {
-            const { key, style, ...restProps } = params.props as any;
+            const { key, style, ...restProps } = params.props as unknown as {
+              key?: unknown;
+              style?: Record<string, unknown>;
+              [key: string]: unknown;
+            };
             return (
               <Badge
-                key={key}
+                key={String(key)}
                 size="300"
                 variant="Secondary"
                 fill="Solid"
                 radii="Pill"
                 outlined
-                {...restProps}
+                {...(restProps as Record<string, unknown>)}
                 style={{
-                  ...style,
+                  ...(style as Record<string, unknown>),
                   zIndex: 0,
                 }}
               />
@@ -224,6 +276,12 @@ export function AudioContent({
         controls={false}
         autoPlay
         ref={audioRef}
+        // See VideoContent: CORS opts this Range-streamed media out of Firefox's ORB.
+        crossOrigin={
+          srcState.status === AsyncStatus.Success && !srcState.data.startsWith('blob:')
+            ? 'anonymous'
+            : undefined
+        }
         onVolumeChange={(e) => {
           localStorage.setItem(MEDIA_VOLUME_KEY, String((e.target as HTMLAudioElement).volume));
         }}

@@ -1,23 +1,14 @@
-import {
-  Avatar,
-  Box,
-  Button,
-  Chip,
-  color,
-  Icon,
-  Icons,
-  Input,
-  Spinner,
-  Text,
-  TextArea,
-} from 'folds';
-import { FormEventHandler, useCallback, useMemo, useState } from 'react';
+import { Avatar, Box, Chip, config, Input, Text, TextArea } from 'folds';
+import { ArrowsClockwise, chipIcon, menuIcon, PencilSimple } from '$components/icons/phosphor';
+import type { FormEventHandler } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAtomValue } from 'jotai';
 import Linkify from 'linkify-react';
 import classNames from 'classnames';
-import { JoinRule, MatrixError } from '$types/matrix-sdk';
-import { SequenceCard } from '$components/sequence-card';
-import { SequenceCardStyle } from '$features/room-settings/styles.css';
+import type { StateEvents } from '$types/matrix-sdk';
+import { JoinRule, EventType } from '$types/matrix-sdk';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
+import { Image as MediaImage } from '$components/media';
 import { useRoom } from '$hooks/useRoom';
 import { useRoomAvatar, useRoomJoinRule, useRoomName, useRoomTopic } from '$hooks/useRoomMeta';
 import { mDirectAtom } from '$state/mDirectList';
@@ -27,14 +18,25 @@ import { RoomAvatar, RoomIcon } from '$components/room-avatar';
 import { mxcUrlToHttp } from '$utils/matrix';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
-import { StateEvent } from '$types/matrix/room';
+
 import { CompactUploadCardRenderer } from '$components/upload-card';
 import { useObjectURL } from '$hooks/useObjectURL';
-import { createUploadAtom, UploadSuccess } from '$state/upload';
+import type { UploadSuccess } from '$state/upload';
+import { createUploadAtom } from '$state/upload';
 import { useFilePicker } from '$hooks/useFilePicker';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { useAlive } from '$hooks/useAlive';
-import { RoomPermissionsAPI } from '$hooks/useRoomPermissions';
+import { type RoomPermissionsAPI } from '$hooks/useRoomPermissions';
+import { useSetting } from '$state/hooks/settings';
+import { settingsAtom } from '$state/settings';
+import { useStateEvent } from '$hooks/useStateEvent';
+import type { RoomBannerContent } from '$types/matrix-sdk-events';
+import { CustomStateEvent } from '$types/matrix/room';
+import { SettingTile } from '$components/setting-tile';
+import { confirm } from '$components/confirm/confirm';
+import { reportMediaLoadFailure } from '$utils/mediaLoadDiagnostics';
+import { AsyncError } from '$components/AsyncError';
+import { Button } from '$components/button';
 
 type RoomProfileEditProps = {
   canEditAvatar: boolean;
@@ -46,7 +48,7 @@ type RoomProfileEditProps = {
   isDm: boolean;
   onClose: () => void;
 };
-export function RoomProfileEdit({
+function RoomProfileEdit({
   canEditAvatar,
   canEditName,
   canEditTopic,
@@ -90,15 +92,21 @@ export function RoomProfileEdit({
     useCallback(
       async (roomAvatarMxc?: string | null, roomName?: string, roomTopic?: string) => {
         if (roomAvatarMxc !== undefined) {
-          await mx.sendStateEvent(room.roomId, StateEvent.RoomAvatar as any, {
-            url: roomAvatarMxc,
-          });
+          await mx.sendStateEvent(
+            room.roomId,
+            EventType.RoomAvatar as keyof StateEvents,
+            roomAvatarMxc ? { url: roomAvatarMxc } : {}
+          );
         }
         if (roomName !== undefined) {
-          await mx.sendStateEvent(room.roomId, StateEvent.RoomName as any, { name: roomName });
+          await mx.sendStateEvent(room.roomId, EventType.RoomName as keyof StateEvents, {
+            name: roomName,
+          });
         }
         if (roomTopic !== undefined) {
-          await mx.sendStateEvent(room.roomId, StateEvent.RoomTopic as any, { topic: roomTopic });
+          await mx.sendStateEvent(room.roomId, EventType.RoomTopic as keyof StateEvents, {
+            topic: roomTopic,
+          });
         }
       },
       [mx, room.roomId]
@@ -239,7 +247,7 @@ export function RoomProfileEdit({
               disabled={submitting}
               title="Reset DM Name"
             >
-              <Icon src={Icons.Reload} size="100" />
+              {menuIcon(ArrowsClockwise)}
             </Button>
           )}
         </Box>
@@ -254,19 +262,17 @@ export function RoomProfileEdit({
           readOnly={!canEditTopic || submitting}
         />
       </Box>
-      {submitState.status === AsyncStatus.Error && (
-        <Text size="T200" style={{ color: color.Critical.Main }}>
-          {(submitState.error as MatrixError).message}
-        </Text>
-      )}
+      <AsyncError state={submitState} />
       <Box gap="300">
         <Button
           type="submit"
           variant="Success"
           size="300"
           radii="300"
-          disabled={uploadingAvatar || submitting}
-          before={submitting && <Spinner size="100" variant="Success" fill="Solid" />}
+          disabled={uploadingAvatar}
+          loading={submitting}
+          spinnerVariant="Success"
+          spinnerSize="100"
         >
           <Text size="B300">Save</Text>
         </Button>
@@ -285,6 +291,149 @@ export function RoomProfileEdit({
   );
 }
 
+export type ProfileProps = {
+  permissions: RoomPermissionsAPI;
+  bannerURI?: string;
+};
+function RoomBannerEdit({ bannerURI, permissions }: Readonly<ProfileProps>) {
+  const mx = useMatrixClient();
+  const space = useRoom();
+
+  const userId = mx.getUserId() ?? '';
+  const canEdit = permissions.stateEvent(CustomStateEvent.RoomBanner, userId);
+
+  const [stagedUrl, setStagedUrl] = useState<string>();
+  const [isRemoving, setIsRemoving] = useState(false);
+
+  const bannerUrl = bannerURI;
+
+  useEffect(() => {
+    if (bannerUrl) {
+      setStagedUrl(undefined);
+    }
+  }, [bannerUrl]);
+
+  const [imageFile, setImageFile] = useState<File>();
+  const imageFileURL = useObjectURL(imageFile);
+
+  const uploadAtom = useMemo(() => {
+    if (imageFile) return createUploadAtom(imageFile);
+    return undefined;
+  }, [imageFile]);
+
+  const pickFile = useFilePicker(setImageFile, false);
+
+  const handlePick = useCallback(() => {
+    setIsRemoving(false);
+    setStagedUrl(undefined);
+    pickFile('image/*');
+  }, [pickFile]);
+
+  const handleRemoveUpload = useCallback(() => {
+    setImageFile(undefined);
+  }, []);
+
+  const handleUploaded = useCallback(
+    (upload: UploadSuccess) => {
+      const { mxc } = upload;
+
+      if (imageFileURL) setStagedUrl(imageFileURL);
+      mx.sendStateEvent(space.roomId, CustomStateEvent.RoomBanner, { url: mxc }, '');
+      setImageFile(undefined);
+    },
+    [mx, imageFileURL, space]
+  );
+
+  const handleRemoveBanner = async () => {
+    const ok = await confirm({
+      title: 'Remove Banner',
+      description: 'Are you sure you want to remove profile banner?',
+      action: 'Remove',
+      variant: 'Critical',
+    });
+    if (ok) {
+      setIsRemoving(true);
+      setStagedUrl(undefined);
+      setImageFile(undefined);
+      mx.sendStateEvent(space.roomId, CustomStateEvent.RoomBanner, { url: '' }, '');
+    }
+  };
+
+  const previewUrl = isRemoving ? undefined : imageFileURL || stagedUrl || bannerUrl;
+
+  return (
+    <SettingTile title="Banner" focusId="banner">
+      <Box direction="Column" gap="300" grow="Yes">
+        <Box
+          style={{
+            height: '100px',
+            width: '100%',
+            borderRadius: config.radii.R400,
+            overflow: 'hidden',
+            backgroundColor: 'var(--sable-surface-container)',
+            position: 'relative',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {previewUrl ? (
+            <MediaImage
+              src={previewUrl}
+              key={previewUrl}
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              alt="Banner Preview"
+              onError={() => reportMediaLoadFailure('room_banner_preview')}
+            />
+          ) : (
+            <Box justifyContent="Center" alignItems="Center">
+              <Text priority="300" size="T200">
+                No Banner Set
+              </Text>
+            </Box>
+          )}
+        </Box>
+
+        {uploadAtom ? (
+          <Box gap="200" direction="Column">
+            <CompactUploadCardRenderer
+              uploadAtom={uploadAtom}
+              onRemove={handleRemoveUpload}
+              onComplete={handleUploaded}
+            />
+          </Box>
+        ) : (
+          <Box gap="200">
+            <Button
+              onClick={handlePick}
+              size="300"
+              variant="Secondary"
+              fill="Soft"
+              outlined
+              radii="300"
+              disabled={!canEdit}
+            >
+              <Text size="B300">{bannerUrl ? 'Change Banner' : 'Upload Banner'}</Text>
+            </Button>
+            {bannerUrl && (
+              <Button
+                size="300"
+                variant="Critical"
+                fill="None"
+                radii="300"
+                onClick={handleRemoveBanner}
+                disabled={!canEdit}
+              >
+                <Text size="B300">Remove</Text>
+              </Button>
+            )}
+          </Box>
+        )}
+      </Box>
+    </SettingTile>
+  );
+}
+
 type RoomProfileProps = {
   permissions: RoomPermissionsAPI;
 };
@@ -294,15 +443,16 @@ export function RoomProfile({ permissions }: RoomProfileProps) {
   const room = useRoom();
   const directs = useAtomValue(mDirectAtom);
   const isDm = directs.has(room.roomId);
+  const [customDMCards] = useSetting(settingsAtom, 'customDMCards');
 
-  const avatar = useRoomAvatar(room, directs.has(room.roomId));
+  const avatar = useRoomAvatar(room, directs.has(room.roomId) && !customDMCards);
   const name = useRoomName(room);
   const topic = useRoomTopic(room);
   const joinRule = useRoomJoinRule(room);
 
-  const canEditAvatar = permissions.stateEvent(StateEvent.RoomAvatar, mx.getSafeUserId());
-  const canEditName = permissions.stateEvent(StateEvent.RoomName, mx.getSafeUserId());
-  const canEditTopic = permissions.stateEvent(StateEvent.RoomTopic, mx.getSafeUserId());
+  const canEditAvatar = permissions.stateEvent(EventType.RoomAvatar, mx.getSafeUserId());
+  const canEditName = permissions.stateEvent(EventType.RoomName, mx.getSafeUserId());
+  const canEditTopic = permissions.stateEvent(EventType.RoomTopic, mx.getSafeUserId());
   const canEdit = canEditAvatar || canEditName || canEditTopic;
 
   const avatarUrl = avatar
@@ -312,6 +462,10 @@ export function RoomProfile({ permissions }: RoomProfileProps) {
   const [edit, setEdit] = useState(false);
 
   const handleCloseEdit = useCallback(() => setEdit(false), []);
+
+  const bannerState = useStateEvent(room, CustomStateEvent.RoomBanner);
+  const bannerMXC = bannerState?.getContent<RoomBannerContent>()?.url;
+  const bannerURI = mxcUrlToHttp(mx, bannerMXC ?? '', useAuthentication);
 
   return (
     <Box direction="Column" gap="100">
@@ -352,7 +506,7 @@ export function RoomProfile({ permissions }: RoomProfileProps) {
                     variant="Secondary"
                     fill="Soft"
                     radii="300"
-                    before={<Icon size="50" src={Icons.Pencil} />}
+                    before={chipIcon(PencilSimple)}
                     onClick={() => setEdit(true)}
                     outlined
                   >
@@ -381,6 +535,17 @@ export function RoomProfile({ permissions }: RoomProfileProps) {
           </Box>
         )}
       </SequenceCard>
+      {room.isSpaceRoom() && (
+        <SequenceCard
+          className={SequenceCardStyle}
+          variant="SurfaceVariant"
+          direction="Column"
+          gap="400"
+          disabled={!canEdit}
+        >
+          <RoomBannerEdit permissions={permissions} bannerURI={bannerURI ?? undefined} />
+        </SequenceCard>
+      )}
     </Box>
   );
 }

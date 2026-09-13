@@ -1,33 +1,24 @@
-import {
-  Box,
-  Button,
-  config,
-  Dialog,
-  Icon,
-  IconButton,
-  Icons,
-  Menu,
-  MenuItem,
-  PopOut,
-  RectCords,
-  Spinner,
-  Text,
-} from 'folds';
-import { HttpApiEvent, HttpApiEventHandlerMap, MatrixClient } from '$types/matrix-sdk';
+import type { RectCords } from 'folds';
+import { Box, Button, config, Dialog, IconButton, Menu, MenuItem, Spinner, Text } from 'folds';
+import { PopOut } from '$components/overlay-stack';
+import type { MatrixClient } from '$types/matrix-sdk';
 import FocusTrap from 'focus-trap-react';
-import { useRef, MouseEventHandler, ReactNode, useCallback, useEffect, useState } from 'react';
+import type { MouseEventHandler, ReactNode } from 'react';
+import { useRef, useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import * as Sentry from '@sentry/react';
-import { useNavigate } from 'react-router-dom';
+import { Link, matchPath, useLocation, useNavigate } from 'react-router';
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import {
   clearCacheAndReload,
   clearLoginData,
-  clearMismatchedStores,
+  discardSessionStores,
   initClient,
   logoutClient,
   startClient,
-  stopClient,
 } from '$client/initMatrix';
+import { isNativeCryptoStoreError } from '$app/crypto/install';
+import { LegacyKeyExport } from './LegacyKeyExport';
+import { AsyncError } from '$components/AsyncError';
 import { SplashScreen } from '$components/splash-screen';
 import { ServerConfigsLoader } from '$components/ServerConfigsLoader';
 import { CapabilitiesProvider } from '$hooks/useCapabilities';
@@ -35,8 +26,10 @@ import { MediaConfigProvider } from '$hooks/useMediaConfig';
 import { MatrixClientProvider } from '$hooks/useMatrixClient';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { useSyncState } from '$hooks/useSyncState';
+import { useCrossSigningResetDetect } from '$hooks/useCrossSigningResetDetect';
+import { useSessionLogout } from '$hooks/useSessionLogout';
 import { stopPropagation } from '$utils/keyboard';
-import { AuthMetadataProvider } from '$hooks/useAuthMetadata';
+import { AuthMetadataProvider, getSessionAuthMetadata } from '$hooks/useAuthMetadata';
 import {
   sessionsAtom,
   activeSessionIdAtom,
@@ -46,24 +39,102 @@ import {
 import { createLogger } from '$utils/debug';
 import { useSyncNicknames } from '$hooks/useNickname';
 import { useAppVisibility } from '$hooks/useAppVisibility';
-import { getHomePath } from '$pages/pathUtils';
-import { useClientConfig } from '$hooks/useClientConfig';
-import { pushSessionToSW } from '../../../sw-session';
+import { useNetworkRecovery } from '$hooks/useNetworkRecovery';
+import { useLoopbackMediaRecovery } from '$hooks/useLoopbackMediaRecovery';
+import { useSyncOrchestrator } from '$hooks/useSyncOrchestrator';
+import { usePushDiagnosticsReport } from '$hooks/usePushDiagnosticsReport';
+import { composerIcon, DotsThreeOutlineVerticalIcon } from '$components/icons/phosphor';
+import { getHomePath, getLoginPath, withSearchParam } from '$pages/pathUtils';
+import { DIRECT_ROOM_PATH, HOME_ROOM_PATH, SPACE_ROOM_PATH } from '$pages/paths';
+import { getCanonicalAliasRoomId, isRoomAlias, isRoomId } from '$utils/matrix';
+import { pushPersistedSessionToSW, pushSessionToSW } from '../../../sw-session';
 import { SyncStatus } from './SyncStatus';
 import { SpecVersions } from './SpecVersions';
 import { AutoDiscovery } from './AutoDiscovery';
+import { useSetting } from '$state/hooks/settings';
+import { settingsAtom } from '$state/settings';
+import { SYSTEM_BAR_REFRESH_EVENT } from '$components/app-shell/SystemBarShell';
 
 const log = createLogger('ClientRoot');
+
+const SESSION_SWITCH_KEY = 'sable-session-switch';
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 const isClientReady = (syncState: string | null): boolean =>
   syncState === 'PREPARED' || syncState === 'SYNCING' || syncState === 'CATCHUP';
 
+const resolveLocalRoomId = (
+  mx: MatrixClient,
+  encodedRoomIdOrAlias?: string
+): string | undefined => {
+  if (!encodedRoomIdOrAlias) return undefined;
+  try {
+    const roomIdOrAlias = decodeURIComponent(encodedRoomIdOrAlias);
+    if (isRoomId(roomIdOrAlias)) return roomIdOrAlias;
+    if (isRoomAlias(roomIdOrAlias)) return getCanonicalAliasRoomId(mx, roomIdOrAlias);
+  } catch {
+    // Ignore malformed route values and let the normal router handle them.
+  }
+  return undefined;
+};
+
 function ClientRootLoading() {
+  const sessions = useAtomValue(sessionsAtom);
+  const activeSessionId = useAtomValue(activeSessionIdAtom);
+  const setSessions = useSetAtom(sessionsAtom);
+
+  const [showEasterEggs] = useSetting(settingsAtom, 'showEasterEggs');
+  const [animalKind] = useSetting(settingsAtom, 'animalKind');
+
+  const activeSession: Session | undefined =
+    sessions.find((session) => session.userId === activeSessionId) ?? sessions[0];
+
+  const usingSlidingSync = activeSession?.slidingSyncOptIn === true;
+
+  const handleSwap = () => {
+    if (!activeSession) return;
+
+    setSessions({
+      type: 'PUT',
+      session: {
+        ...activeSession,
+        slidingSyncOptIn: !usingSlidingSync,
+      },
+    });
+
+    window.location.reload();
+  };
+
+  const loadingAnimal = showEasterEggs && animalKind ? animalKind : 'cats';
+
   return (
     <SplashScreen>
       <Box direction="Column" grow="Yes" alignItems="Center" justifyContent="Center" gap="400">
         <Spinner variant="Secondary" size="600" />
-        <Text>Petting cats</Text>
+
+        <Text>{`Petting ${loadingAnimal}`}</Text>
+
+        {activeSession && (
+          <Text
+            as="button"
+            type="button"
+            onClick={handleSwap}
+            size="T200"
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              color: 'inherit',
+              cursor: 'pointer',
+              opacity: 0.7,
+              textDecoration: 'underline',
+            }}
+          >
+            {usingSlidingSync ? 'Swap to classic sync' : 'Swap to sliding sync'}
+          </Text>
+        )}
       </Box>
     </SplashScreen>
   );
@@ -93,9 +164,12 @@ function ClientRootOptions({ mx, onLogout }: ClientRootOptionsProps) {
       }}
       variant="Background"
       fill="None"
+      aria-pressed={!!menuAnchor}
       onClick={handleToggle}
     >
-      <Icon size="200" src={Icons.VerticalDots} />
+      {composerIcon(DotsThreeOutlineVerticalIcon, {
+        weight: menuAnchor ? 'fill' : 'regular',
+      })}
       <PopOut
         anchor={menuAnchor}
         position="Bottom"
@@ -148,34 +222,17 @@ function ClientRootOptions({ mx, onLogout }: ClientRootOptionsProps) {
   );
 }
 
-const useLogoutListener = (mx?: MatrixClient) => {
-  useEffect(() => {
-    const handleLogout: HttpApiEventHandlerMap[HttpApiEvent.SessionLoggedOut] = async () => {
-      Sentry.addBreadcrumb({
-        category: 'auth',
-        message: 'Session forcibly logged out by server',
-        level: 'warning',
-      });
-      if (mx) stopClient(mx);
-      await mx?.clearStores();
-      window.localStorage.clear();
-      window.location.reload();
-    };
-
-    mx?.on(HttpApiEvent.SessionLoggedOut, handleLogout);
-    return () => {
-      mx?.removeListener(HttpApiEvent.SessionLoggedOut, handleLogout);
-    };
-  }, [mx]);
-};
-
 type ClientRootProps = {
   children: ReactNode;
 };
 export function ClientRoot({ children }: ClientRootProps) {
-  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
-  const clientConfig = useClientConfig();
+  const location = useLocation();
+
+  useLayoutEffect(() => {
+    window.dispatchEvent(new Event(SYSTEM_BAR_REFRESH_EVENT));
+  }, [location.key]);
+
   const sessions = useAtomValue(sessionsAtom);
   const [activeSessionId, setActiveSessionId] = useAtom(activeSessionIdAtom);
   const setSessions = useSetAtom(sessionsAtom);
@@ -188,8 +245,9 @@ export function ClientRoot({ children }: ClientRootProps) {
   const loadedUserIdRef = useRef<string | undefined>(undefined);
   const syncStartTimeRef = useRef(performance.now());
   const firstSyncReadyRef = useRef(false);
+  const [syncReadyClient, setSyncReadyClient] = useState<MatrixClient>();
 
-  const [loadState, loadMatrix, setLoadState] = useAsyncCallback<MatrixClient, Error, []>(
+  const [loadState, loadMatrix] = useAsyncCallback<MatrixClient, Error, []>(
     useCallback(async () => {
       if (!activeSession) {
         log.error('no session found');
@@ -199,72 +257,104 @@ export function ClientRoot({ children }: ClientRootProps) {
         log.log('persisting activeSessionId →', activeSession.userId);
         setActiveSessionId(activeSession.userId);
       }
-      await clearMismatchedStores();
       log.log('initClient for', activeSession.userId);
       const newMx = await initClient(activeSession);
       loadedUserIdRef.current = activeSession.userId;
-      pushSessionToSW(activeSession.baseUrl, activeSession.accessToken);
+      // initClient may have refreshed the token; push the persisted session, not
+      // the stale captured one.
+      await pushPersistedSessionToSW(activeSession);
       return newMx;
     }, [activeSession, activeSessionId, setActiveSessionId])
   );
 
-  const mx = loadState.status === AsyncStatus.Success ? loadState.data : undefined;
+  const loadedClient = loadState.status === AsyncStatus.Success ? loadState.data : undefined;
+  const sessionExpired = useSessionLogout(loadedClient);
+  const mx = sessionExpired ? undefined : loadedClient;
+
+  const nativeCryptoError =
+    loadState.status === AsyncStatus.Error && isNativeCryptoStoreError(loadState.error)
+      ? loadState.error
+      : undefined;
+
+  const roomMatch =
+    matchPath(HOME_ROOM_PATH, location.pathname) ??
+    matchPath(DIRECT_ROOM_PATH, location.pathname) ??
+    matchPath(SPACE_ROOM_PATH, location.pathname);
+  const encodedInitialRoomIdOrAlias = roomMatch?.params.roomIdOrAlias;
 
   const [startState, startMatrix] = useAsyncCallback<void, Error, [MatrixClient]>(
     useCallback(
-      (m) =>
-        startClient(m, {
+      (m) => {
+        const initialRoomId = resolveLocalRoomId(m, encodedInitialRoomIdOrAlias);
+
+        return startClient(m, {
           baseUrl: activeSession?.baseUrl,
-          slidingSync: clientConfig.slidingSync,
           sessionSlidingSyncOptIn: activeSession?.slidingSyncOptIn,
-        }),
-      [activeSession?.baseUrl, activeSession?.slidingSyncOptIn, clientConfig.slidingSync]
+          initialRoomIds: initialRoomId ? [initialRoomId] : undefined,
+          onCachedRoomsLoaded: () => setSyncReadyClient(m),
+        });
+      },
+      [activeSession?.baseUrl, activeSession?.slidingSyncOptIn, encodedInitialRoomIdOrAlias]
     )
   );
 
+  // Closing the OlmMachine with calls still in flight corrupts the page-wide crypto
+  // WASM heap, so reload instead to give the next account a fresh instance.
   useEffect(() => {
     if (!activeSession) return;
-    if (loadedUserIdRef.current && loadedUserIdRef.current !== activeSession.userId) {
-      log.log(
-        'session changed from',
-        loadedUserIdRef.current,
-        '→',
-        activeSession.userId,
-        '— reloading client'
-      );
-      pushSessionToSW(activeSession.baseUrl, activeSession.accessToken);
-      if (mx?.clientRunning) {
-        stopClient(mx);
-      }
-      setLoading(true);
-      loadedUserIdRef.current = undefined;
-      setLoadState({ status: AsyncStatus.Idle });
-      navigate(getHomePath(), { replace: true });
-    }
-  }, [activeSession, mx, navigate, setLoadState]);
+    if (!loadedUserIdRef.current || loadedUserIdRef.current === activeSession.userId) return;
+
+    log.log(
+      'session changed from',
+      loadedUserIdRef.current,
+      '→',
+      activeSession.userId,
+      '— reloading page'
+    );
+    loadedUserIdRef.current = undefined;
+    window.sessionStorage.setItem(SESSION_SWITCH_KEY, activeSession.userId);
+
+    pushSessionToSW(activeSession.baseUrl, activeSession.accessToken, activeSession.userId).finally(
+      () => window.location.reload()
+    );
+  }, [activeSession]);
+
+  // The reload keeps the previous account's route, which the new one cannot resolve.
+  useEffect(() => {
+    if (!window.sessionStorage.getItem(SESSION_SWITCH_KEY)) return;
+    window.sessionStorage.removeItem(SESSION_SWITCH_KEY);
+    navigate(getHomePath(), { replace: true });
+  }, [navigate]);
 
   const handleLogout = useCallback(async () => {
     if (!mx || !activeSession) return;
     await logoutClient(mx, activeSession);
     setSessions({ type: 'DELETE', session: activeSession } as SessionsAction);
-    const remaining = sessions.filter((s) => s.userId !== activeSession.userId);
-    setActiveSessionId(remaining[0]?.userId ?? undefined);
+    setActiveSessionId(
+      sessions.find((s) => s.userId !== activeSession.userId)?.userId ?? undefined
+    );
     window.location.reload();
   }, [mx, activeSession, sessions, setSessions, setActiveSessionId]);
 
-  useSyncNicknames(mx);
-  useLogoutListener(mx);
-  useAppVisibility(mx);
-
-  useEffect(
-    () => () => {
-      if (mx?.clientRunning) {
-        log.log('ClientRoot unmounting — stopping client', mx.getUserId());
-        stopClient(mx);
-      }
-    },
-    [mx]
+  const [recoveryState, signOutForCryptoRecovery] = useAsyncCallback<void, Error, []>(
+    useCallback(async () => {
+      if (!activeSession) return;
+      await discardSessionStores(activeSession);
+      setSessions({ type: 'DELETE', session: activeSession } as SessionsAction);
+      setActiveSessionId(
+        sessions.find((session) => session.userId !== activeSession.userId)?.userId ?? undefined
+      );
+      window.location.reload();
+    }, [activeSession, sessions, setSessions, setActiveSessionId])
   );
+
+  useSyncNicknames(mx);
+  useAppVisibility(mx);
+  useNetworkRecovery(mx);
+  useSyncOrchestrator(startState.status === AsyncStatus.Success ? mx : undefined);
+  usePushDiagnosticsReport();
+  useLoopbackMediaRecovery();
+  useCrossSigningResetDetect(mx);
 
   useEffect(() => {
     if (loadState.status === AsyncStatus.Idle) {
@@ -279,39 +369,53 @@ export function ClientRoot({ children }: ClientRootProps) {
   }, [mx, startMatrix]);
 
   useEffect(() => {
-    if (!mx) return;
+    firstSyncReadyRef.current = false;
+    syncStartTimeRef.current = performance.now();
+
+    if (!mx) {
+      setSyncReadyClient(undefined);
+      return;
+    }
+
     if (isClientReady(mx.getSyncState())) {
-      setLoading(false);
+      setSyncReadyClient(mx);
+      firstSyncReadyRef.current = true;
     }
   }, [mx]);
 
   useSyncState(
     mx,
-    useCallback((state: string) => {
-      if (isClientReady(state)) {
-        if (!firstSyncReadyRef.current) {
-          firstSyncReadyRef.current = true;
-          Sentry.metrics.distribution(
-            'sable.sync.time_to_ready_ms',
-            performance.now() - syncStartTimeRef.current
-          );
+    useCallback(
+      (state: string) => {
+        if (isClientReady(state)) {
+          setSyncReadyClient((current) => (current === mx ? current : mx));
+          if (!firstSyncReadyRef.current) {
+            firstSyncReadyRef.current = true;
+            Sentry.metrics.distribution(
+              'sable.sync.time_to_ready_ms',
+              performance.now() - syncStartTimeRef.current
+            );
+          }
         }
-        setLoading(false);
-      }
-    }, [])
+      },
+      [mx]
+    )
   );
+
+  const isError = loadState.status === AsyncStatus.Error || startState.status === AsyncStatus.Error;
+  const nativeCryptoRecoveryRequired = nativeCryptoError !== undefined;
 
   // Set matrix client context: homeserver and sync type (not PII)
   useEffect(() => {
     if (!activeSession?.baseUrl) return undefined;
     Sentry.setContext('client', {
       homeserver: activeSession.baseUrl,
-      sliding_sync: clientConfig.slidingSync,
+      sliding_sync: activeSession.slidingSyncOptIn === true,
     });
     return () => {
       Sentry.setContext('client', null);
     };
-  }, [activeSession?.baseUrl, clientConfig.slidingSync]);
+  }, [activeSession?.baseUrl, activeSession?.slidingSyncOptIn]);
 
   // Set a pseudonymous hashed user ID for error grouping — never sends raw Matrix ID
   useEffect(() => {
@@ -340,7 +444,7 @@ export function ClientRoot({ children }: ClientRootProps) {
   // Capture fatal client failures — useAsyncCallback swallows these into state so
   // they never reach the React ErrorBoundary; explicit capture is required.
   useEffect(() => {
-    if (loadState.status === AsyncStatus.Error) {
+    if (loadState.status === AsyncStatus.Error && !isNativeCryptoStoreError(loadState.error)) {
       Sentry.captureException(loadState.error, { tags: { phase: 'load' } });
     }
   }, [loadState]);
@@ -351,56 +455,109 @@ export function ClientRoot({ children }: ClientRootProps) {
     }
   }, [startState]);
 
+  if (sessionExpired && activeSession) {
+    return (
+      <SplashScreen>
+        <Box direction="Column" grow="Yes" alignItems="Center" justifyContent="Center" gap="400">
+          <Text>Sign in again as {activeSession.userId}.</Text>
+          <Button
+            as={Link}
+            reloadDocument
+            to={withSearchParam(getLoginPath(activeSession.baseUrl), {
+              addAccount: '1',
+              username: activeSession.userId,
+            })}
+          >
+            <Text as="span" size="B400">
+              Sign in again
+            </Text>
+          </Button>
+          {sessions
+            .filter((session) => session.userId !== activeSession.userId)
+            .map((session) => (
+              <Button key={session.userId} onClick={() => setActiveSessionId(session.userId)}>
+                <Text as="span" size="B400">
+                  Switch to {session.userId}
+                </Text>
+              </Button>
+            ))}
+        </Box>
+      </SplashScreen>
+    );
+  }
+
   return (
-    <AutoDiscovery userId={userId} baseUrl={baseUrl}>
-      <SpecVersions baseUrl={baseUrl}>
-        {mx && <SyncStatus mx={mx} />}
-        {loading && <ClientRootOptions mx={mx} onLogout={handleLogout} />}
-        {(loadState.status === AsyncStatus.Error || startState.status === AsyncStatus.Error) && (
-          <SplashScreen>
-            <Box
-              direction="Column"
-              grow="Yes"
-              alignItems="Center"
-              justifyContent="Center"
-              gap="400"
-            >
-              <Dialog>
-                <Box direction="Column" gap="400" style={{ padding: config.space.S400 }}>
-                  {loadState.status === AsyncStatus.Error && (
-                    <Text>{`Failed to load. ${loadState.error.message}`}</Text>
-                  )}
-                  {startState.status === AsyncStatus.Error && (
-                    <Text>{`Failed to start. ${startState.error.message}`}</Text>
-                  )}
+    <AutoDiscovery userId={userId ?? ''} baseUrl={baseUrl ?? ''}>
+      {mx && <SyncStatus mx={mx} />}
+      {(!mx || isError) && <ClientRootOptions mx={mx} onLogout={handleLogout} />}
+      {isError && (
+        <SplashScreen>
+          <Box direction="Column" grow="Yes" alignItems="Center" justifyContent="Center" gap="400">
+            <Dialog>
+              <Box direction="Column" gap="400" style={{ padding: config.space.S400 }}>
+                {loadState.status === AsyncStatus.Error &&
+                  (nativeCryptoRecoveryRequired ? (
+                    <>
+                      <Text>Sign in again to continue using encrypted chats.</Text>
+                      <Text>
+                        Export your message keys first, or restore them from backup after signing
+                        in.
+                      </Text>
+                      <LegacyKeyExport exporter={nativeCryptoError.exportRoomKeys} />
+                      <AsyncError state={recoveryState} prefix="Failed to sign out" size="T300" />
+                      <Button
+                        variant="Critical"
+                        onClick={signOutForCryptoRecovery}
+                        disabled={recoveryState.status === AsyncStatus.Loading}
+                      >
+                        <Text as="span" size="B400">
+                          Sign out and sign in again
+                        </Text>
+                      </Button>
+                    </>
+                  ) : (
+                    <Text>{`Failed to load. ${errorMessage(loadState.error)}`}</Text>
+                  ))}
+                {startState.status === AsyncStatus.Error && (
+                  <Text>{`Failed to start. ${errorMessage(startState.error)}`}</Text>
+                )}
+                {!nativeCryptoRecoveryRequired && (
                   <Button variant="Critical" onClick={mx ? () => startMatrix(mx) : loadMatrix}>
                     <Text as="span" size="B400">
                       Retry
                     </Text>
                   </Button>
-                </Box>
-              </Dialog>
-            </Box>
-          </SplashScreen>
-        )}
-        {loading || !mx ? (
-          <ClientRootLoading />
-        ) : (
-          <MatrixClientProvider value={mx}>
-            <ServerConfigsLoader>
-              {(serverConfigs) => (
-                <CapabilitiesProvider value={serverConfigs.capabilities ?? {}}>
-                  <MediaConfigProvider value={serverConfigs.mediaConfig ?? {}}>
-                    <AuthMetadataProvider value={serverConfigs.authMetadata}>
-                      {children}
-                    </AuthMetadataProvider>
-                  </MediaConfigProvider>
-                </CapabilitiesProvider>
-              )}
-            </ServerConfigsLoader>
-          </MatrixClientProvider>
-        )}
-      </SpecVersions>
+                )}
+              </Box>
+            </Dialog>
+          </Box>
+        </SplashScreen>
+      )}
+      {!mx ? (
+        <ClientRootLoading />
+      ) : isError ? null : (
+        <MatrixClientProvider value={mx}>
+          {!syncReadyClient ? (
+            <ClientRootLoading />
+          ) : (
+            <SpecVersions baseUrl={baseUrl ?? ''}>
+              <ServerConfigsLoader>
+                {(serverConfigs) => (
+                  <CapabilitiesProvider value={serverConfigs.capabilities ?? {}}>
+                    <MediaConfigProvider value={serverConfigs.mediaConfig ?? {}}>
+                      <AuthMetadataProvider
+                        value={getSessionAuthMetadata(serverConfigs.authMetadata, activeSession)}
+                      >
+                        {children}
+                      </AuthMetadataProvider>
+                    </MediaConfigProvider>
+                  </CapabilitiesProvider>
+                )}
+              </ServerConfigsLoader>
+            </SpecVersions>
+          )}
+        </MatrixClientProvider>
+      )}
     </AutoDiscovery>
   );
 }

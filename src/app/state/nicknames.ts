@@ -1,8 +1,6 @@
 import { atom } from 'jotai';
-import { MatrixClient } from '$types/matrix-sdk';
-import { AccountDataEvent } from '$types/matrix/accountData';
-
-export const NICKNAMES_KEY = 'sableNicknames';
+import type { MatrixClient } from '$types/matrix-sdk';
+import { CustomAccountDataEvent } from '$types/matrix/accountData';
 
 export type Nicknames = Record<string, string>;
 
@@ -22,5 +20,5 @@ export const setNicknameAtom = atom<
   }
   set(nicknamesAtom, next);
 
-  mx.setAccountData(AccountDataEvent.SableNicknames, next);
+  mx.setAccountData(CustomAccountDataEvent.SableNicknames, next);
 });

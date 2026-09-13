@@ -1,11 +1,12 @@
-import { MatrixEvent, Room } from '$types/matrix-sdk';
+import type { MatrixEvent, Room } from '$types/matrix-sdk';
 import { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import { produce } from 'immer';
-import { StateEvent } from '$types/matrix/room';
-import { getStateEvent } from '$utils/room';
+
+import { getStateEvent } from '$utils/room/hierarchy';
 import { useStateEvent } from './useStateEvent';
 import { useStateEventCallback } from './useStateEventCallback';
 import { useMatrixClient } from './useMatrixClient';
+import { EventType } from '$types/matrix-sdk';
 
 export type PowerLevelActions = 'invite' | 'redact' | 'kick' | 'ban' | 'historical';
 export type PowerLevelNotificationsAction = 'room';
@@ -46,13 +47,12 @@ const fillMissingPowers = (powerLevels: IPowerLevels): IPowerLevels =>
     const keys = Object.keys(DEFAULT_POWER_LEVELS) as unknown as (keyof IPowerLevels)[];
     keys.forEach((key) => {
       if (draftPl[key] === undefined) {
-        // eslint-disable-next-line no-param-reassign
-        draftPl[key] = DEFAULT_POWER_LEVELS[key] as any;
+        (draftPl as Record<string, unknown>)[key] =
+          (DEFAULT_POWER_LEVELS as Record<string, unknown>)[key] ?? 0;
       }
     });
     if (draftPl.notifications && typeof draftPl.notifications.room !== 'number') {
-      // eslint-disable-next-line no-param-reassign
-      draftPl.notifications.room = DEFAULT_POWER_LEVELS.notifications.room;
+      draftPl.notifications.room = DEFAULT_POWER_LEVELS.notifications.room as number;
     }
     return draftPl;
   });
@@ -66,7 +66,7 @@ const getPowersLevelFromMatrixEvent = (mEvent?: MatrixEvent): IPowerLevels => {
 };
 
 export function usePowerLevels(room: Room): IPowerLevels {
-  const powerLevelsEvent = useStateEvent(room, StateEvent.RoomPowerLevels);
+  const powerLevelsEvent = useStateEvent(room, EventType.RoomPowerLevels);
   const powerLevels: IPowerLevels = useMemo(
     () => getPowersLevelFromMatrixEvent(powerLevelsEvent),
     [powerLevelsEvent]
@@ -75,7 +75,7 @@ export function usePowerLevels(room: Room): IPowerLevels {
   return powerLevels;
 }
 
-export const PowerLevelsContext = createContext<IPowerLevels | null>(null);
+const PowerLevelsContext = createContext<IPowerLevels | null>(null);
 
 export const PowerLevelsContextProvider = PowerLevelsContext.Provider;
 
@@ -85,20 +85,29 @@ export const usePowerLevelsContext = (): IPowerLevels => {
   return pl;
 };
 
+const buildRoomsPowerLevels = (rooms: Room[]): Map<string, IPowerLevels> => {
+  const rToPl = new Map<string, IPowerLevels>();
+
+  rooms.forEach((room) => {
+    const mEvent = getStateEvent(room, EventType.RoomPowerLevels, '');
+    rToPl.set(room.roomId, getPowersLevelFromMatrixEvent(mEvent));
+  });
+
+  return rToPl;
+};
+
 export const useRoomsPowerLevels = (rooms: Room[]): Map<string, IPowerLevels> => {
   const mx = useMatrixClient();
-  const getRoomsPowerLevels = useCallback(() => {
-    const rToPl = new Map<string, IPowerLevels>();
+  const [roomToPowerLevels, setRoomToPowerLevels] = useState(() => buildRoomsPowerLevels(rooms));
+  const [derivedFrom, setDerivedFrom] = useState(rooms);
 
-    rooms.forEach((room) => {
-      const mEvent = getStateEvent(room, StateEvent.RoomPowerLevels, '');
-      rToPl.set(room.roomId, getPowersLevelFromMatrixEvent(mEvent));
-    });
-
-    return rToPl;
-  }, [rooms]);
-
-  const [roomToPowerLevels, setRoomToPowerLevels] = useState(() => getRoomsPowerLevels());
+  // Rooms arriving after mount — a space hierarchy resolving, or state loading
+  // lazily under sliding sync — must re-derive, or their permissions are stuck
+  // at the defaults until a reload.
+  if (derivedFrom !== rooms) {
+    setDerivedFrom(rooms);
+    setRoomToPowerLevels(buildRoomsPowerLevels(rooms));
+  }
 
   useStateEventCallback(
     mx,
@@ -107,14 +116,16 @@ export const useRoomsPowerLevels = (rooms: Room[]): Map<string, IPowerLevels> =>
         const roomId = event.getRoomId();
         if (
           roomId &&
-          event.getType() === StateEvent.RoomPowerLevels &&
+          [EventType.RoomPowerLevels as string, EventType.RoomCreate as string].includes(
+            event.getType()
+          ) &&
           event.getStateKey() === '' &&
-          rooms.find((r) => r.roomId === roomId)
+          rooms.some((r) => r.roomId === roomId)
         ) {
-          setRoomToPowerLevels(getRoomsPowerLevels());
+          setRoomToPowerLevels(buildRoomsPowerLevels(rooms));
         }
       },
-      [rooms, getRoomsPowerLevels]
+      [rooms]
     )
   );
 
@@ -164,7 +175,7 @@ export const readPowerLevel: ReadPowerLevelAPI = {
     if (typeof powerLevel === 'number') {
       return powerLevel;
     }
-    return DEFAULT_POWER_LEVELS.notifications[action];
+    return DEFAULT_POWER_LEVELS.notifications[action] ?? 50;
   },
 };
 
@@ -209,8 +220,12 @@ export type PermissionLocation =
 
 export const getPermissionPower = (
   powerLevels: IPowerLevels,
-  location: PermissionLocation
+  location: PermissionLocation | PermissionLocation[]
 ): number => {
+  if (Array.isArray(location)) {
+    return Math.max(...location.map((loc) => getPermissionPower(powerLevels, loc)));
+  }
+
   if ('user' in location) {
     return readPowerLevel.user(powerLevels, location.key);
   }
@@ -229,30 +244,34 @@ export const getPermissionPower = (
 
 export const applyPermissionPower = (
   powerLevels: IPowerLevels,
-  location: PermissionLocation,
+  location: PermissionLocation | PermissionLocation[],
   power: number
 ): IPowerLevels => {
+  if (Array.isArray(location)) {
+    let result = powerLevels;
+    location.forEach((loc) => {
+      result = applyPermissionPower(result, loc, power);
+    });
+    return result;
+  }
+
   if ('user' in location) {
     if (typeof location.key === 'string') {
       const users = powerLevels.users ?? {};
       users[location.key] = power;
-      // eslint-disable-next-line no-param-reassign
       powerLevels.users = users;
       return powerLevels;
     }
-    // eslint-disable-next-line no-param-reassign
     powerLevels.users_default = power;
     return powerLevels;
   }
   if ('action' in location) {
-    // eslint-disable-next-line no-param-reassign
     powerLevels[location.key] = power;
     return powerLevels;
   }
   if ('notification' in location) {
     const notifications = powerLevels.notifications ?? {};
     notifications[location.key] = power;
-    // eslint-disable-next-line no-param-reassign
     powerLevels.notifications = notifications;
     return powerLevels;
   }
@@ -260,11 +279,9 @@ export const applyPermissionPower = (
     if (typeof location.key === 'string') {
       const events = powerLevels.events ?? {};
       events[location.key] = power;
-      // eslint-disable-next-line no-param-reassign
       powerLevels.events = events;
       return powerLevels;
     }
-    // eslint-disable-next-line no-param-reassign
     powerLevels.state_default = power;
     return powerLevels;
   }
@@ -272,11 +289,9 @@ export const applyPermissionPower = (
   if (typeof location.key === 'string') {
     const events = powerLevels.events ?? {};
     events[location.key] = power;
-    // eslint-disable-next-line no-param-reassign
     powerLevels.events = events;
     return powerLevels;
   }
-  // eslint-disable-next-line no-param-reassign
   powerLevels.events_default = power;
   return powerLevels;
 };

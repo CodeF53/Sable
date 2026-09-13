@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-  CryptoEvent,
+import type {
   CryptoEventHandlerMap,
   VerificationPhase,
   VerificationRequest,
-  VerificationRequestEvent,
   VerificationRequestEventHandlerMap,
   Verifier,
-  VerifierEvent,
   VerifierEventHandlerMap,
 } from '$types/matrix-sdk';
+import { CryptoEvent, VerificationRequestEvent, VerifierEvent } from '$types/matrix-sdk';
 import { useMatrixClient } from './useMatrixClient';
 
 export const useVerificationRequestReceived = (
@@ -25,7 +23,7 @@ export const useVerificationRequestReceived = (
   }, [mx, onRequest]);
 };
 
-export const useVerificationRequestChange = (
+const useVerificationRequestChange = (
   request: VerificationRequest,
   onChange: VerificationRequestEventHandlerMap[VerificationRequestEvent.Change]
 ) => {
@@ -39,6 +37,10 @@ export const useVerificationRequestChange = (
 
 export const useVerificationRequestPhase = (request: VerificationRequest): VerificationPhase => {
   const [phase, setPhase] = useState(() => request.phase);
+
+  useEffect(() => {
+    setPhase(request.phase);
+  }, [request]);
 
   useVerificationRequestChange(
     request,
@@ -68,20 +70,10 @@ export const useVerifierShowSas = (
 ) => {
   useEffect(() => {
     verifier.on(VerifierEvent.ShowSas, onCallback);
+    const current = verifier.getShowSasCallbacks();
+    if (current) onCallback(current);
     return () => {
       verifier.removeListener(VerifierEvent.ShowSas, onCallback);
-    };
-  }, [verifier, onCallback]);
-};
-
-export const useVerifierShowReciprocateQr = (
-  verifier: Verifier,
-  onCallback: VerifierEventHandlerMap[VerifierEvent.ShowReciprocateQr]
-) => {
-  useEffect(() => {
-    verifier.on(VerifierEvent.ShowReciprocateQr, onCallback);
-    return () => {
-      verifier.removeListener(VerifierEvent.ShowReciprocateQr, onCallback);
     };
   }, [verifier, onCallback]);
 };

@@ -1,58 +1,48 @@
-import {
-  ChangeEventHandler,
-  FormEventHandler,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react';
-import {
-  Box,
-  Text,
-  IconButton,
-  Icon,
-  Icons,
-  Input,
-  Avatar,
-  Button,
-  Overlay,
-  OverlayBackdrop,
-  OverlayCenter,
-  Modal,
-  Dialog,
-  Header,
-  config,
-  Spinner,
-} from 'folds';
-import FocusTrap from 'focus-trap-react';
+import type { ChangeEventHandler, FormEventHandler } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Text, IconButton, Input, Avatar, Button, config, Spinner } from 'folds';
+import { menuIcon, Star, Sun, X } from '$components/icons/phosphor';
 import { useSetAtom } from 'jotai';
-import { SequenceCard } from '$components/sequence-card';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
+import type { SettingMenuOption } from '$components/setting-menu-selector';
+import { SettingMenuSelector } from '$components/setting-menu-selector';
 import { SettingTile } from '$components/setting-tile';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { UserProfile, useUserProfile, MSC4440Bio } from '$hooks/useUserProfile';
+import type { UserProfile, MSC4440Bio, ColorSet } from '$hooks/useUserProfile';
+import { invalidateUserProfileCache, useUserProfile } from '$hooks/useUserProfile';
 import { getMxIdLocalPart, mxcUrlToHttp } from '$utils/matrix';
 import { UserAvatar } from '$components/user-avatar';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
-import { nameInitials } from '$utils/common';
+import { nameInitials, xor } from '$utils/common';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { useFilePicker } from '$hooks/useFilePicker';
 import { useObjectURL } from '$hooks/useObjectURL';
-import { stopPropagation } from '$utils/keyboard';
-import { ImageEditor } from '$components/image-editor';
-import { ModalWide } from '$styles/Modal.css';
-import { createUploadAtom, UploadSuccess } from '$state/upload';
+import { toSettingsFocusIdPart } from '$features/settings/settingsLink';
+import type { UploadSuccess } from '$state/upload';
+import { createUploadAtom } from '$state/upload';
 import { CompactUploadCardRenderer } from '$components/upload-card';
+import { Image as MediaImage } from '$components/media';
 import { useCapabilities } from '$hooks/useCapabilities';
 import { profilesCacheAtom } from '$state/userRoomProfile';
-import { SequenceCardStyle } from '$features/settings/styles.css';
 import { useUserPresence } from '$hooks/useUserPresence';
-import { MSC1767Text } from '$types/matrix/common';
+import { useSpecVersions } from '$hooks/useSpecVersions';
+import { useSetting } from '$state/hooks/settings';
+import type { ProfileChangePropagation } from '$state/settings';
+import { settingsAtom } from '$state/settings';
+import type { MSC1767Text } from '$types/matrix/common';
+import { setAvatarUrlWithPropagation, setDisplayNameWithPropagation } from '$utils/msc4466';
 import { TimezoneEditor } from './TimezoneEditor';
 import { PronounEditor } from './PronounEditor';
 import { BioEditor } from './BioEditor';
 import { NameColorEditor } from './NameColorEditor';
 import { StatusEditor } from './StatusEditor';
 import { AnimalCosmetics } from './AnimalCosmetics';
+import * as prefix from '$unstable/prefixes';
+import { showErrorToast } from '$state/toast';
+import { confirm } from '$components/confirm/confirm';
+import { AvatarUploadTile } from '$components/avatar-upload-tile/AvatarUploadTile';
+import { accessibleColor } from '$plugins/color';
+import { ThemeKind } from '$hooks/useTheme';
 
 type PronounSet = {
   summary: string;
@@ -62,12 +52,13 @@ type PronounSet = {
 type ProfileProps = {
   profile: UserProfile;
   userId: string;
+  propagateTo?: ProfileChangePropagation;
 };
-function ProfileAvatar({ profile, userId }: Readonly<ProfileProps>) {
+function ProfileAvatar({ profile, userId, propagateTo }: Readonly<ProfileProps>) {
   const mx = useMatrixClient();
+  const setGlobalProfiles = useSetAtom(profilesCacheAtom);
   const useAuthentication = useMediaAuthentication();
   const capabilities = useCapabilities();
-  const [alertRemove, setAlertRemove] = useState(false);
   const disableSetAvatar = capabilities['m.set_avatar_url']?.enabled === false;
 
   const defaultDisplayName = profile.displayName ?? getMxIdLocalPart(userId) ?? userId;
@@ -75,36 +66,35 @@ function ProfileAvatar({ profile, userId }: Readonly<ProfileProps>) {
     ? (mxcUrlToHttp(mx, profile.avatarUrl, useAuthentication, 96, 96, 'crop') ?? undefined)
     : undefined;
 
-  const [imageFile, setImageFile] = useState<File>();
-  const imageFileURL = useObjectURL(imageFile);
-  const uploadAtom = useMemo(() => {
-    if (imageFile) return createUploadAtom(imageFile);
-    return undefined;
-  }, [imageFile]);
-
-  const pickFile = useFilePicker(setImageFile, false);
-
-  const handleRemoveUpload = useCallback(() => {
-    setImageFile(undefined);
-  }, []);
-
   const handleUploaded = useCallback(
-    (upload: UploadSuccess) => {
-      const { mxc } = upload;
-      mx.setAvatarUrl(mxc);
-      handleRemoveUpload();
+    async (mxc: string) => {
+      await setAvatarUrlWithPropagation(mx, mxc, propagateTo);
+      setGlobalProfiles((prev) => ({
+        ...prev,
+        [userId]: { ...prev[userId], avatarUrl: mxc },
+      }));
     },
-    [mx, handleRemoveUpload]
+    [mx, userId, propagateTo, setGlobalProfiles]
   );
 
-  const handleRemoveAvatar = () => {
-    mx.setAvatarUrl('');
-    setAlertRemove(false);
-  };
+  const handleRemoveAvatar = useCallback(async () => {
+    await setAvatarUrlWithPropagation(mx, '', propagateTo);
+    setGlobalProfiles((prev) => ({
+      ...prev,
+      [userId]: { ...prev[userId], avatarUrl: undefined },
+    }));
+  }, [mx, userId, propagateTo, setGlobalProfiles]);
 
   return (
-    <SettingTile
+    <AvatarUploadTile
       title="Avatar"
+      focusId="avatar"
+      disableSetAvatar={disableSetAvatar}
+      removeDisabled={!avatarUrl}
+      onUpload={handleUploaded}
+      onRemove={handleRemoveAvatar}
+      confirmTitle="Remove Avatar"
+      confirmDescription="Are you sure you want to remove profile avatar?"
       after={
         <Avatar size="500" radii="300">
           <UserAvatar
@@ -114,114 +104,14 @@ function ProfileAvatar({ profile, userId }: Readonly<ProfileProps>) {
           />
         </Avatar>
       }
-    >
-      {uploadAtom ? (
-        <Box gap="200" direction="Column">
-          <CompactUploadCardRenderer
-            uploadAtom={uploadAtom}
-            onRemove={handleRemoveUpload}
-            onComplete={handleUploaded}
-          />
-        </Box>
-      ) : (
-        <Box gap="200">
-          <Button
-            onClick={() => pickFile('image/*')}
-            size="300"
-            variant="Secondary"
-            fill="Soft"
-            outlined
-            radii="300"
-            disabled={disableSetAvatar}
-          >
-            <Text size="B300">Upload</Text>
-          </Button>
-          {avatarUrl && (
-            <Button
-              size="300"
-              variant="Critical"
-              fill="None"
-              radii="300"
-              disabled={disableSetAvatar}
-              onClick={() => setAlertRemove(true)}
-            >
-              <Text size="B300">Remove</Text>
-            </Button>
-          )}
-        </Box>
-      )}
-
-      {imageFileURL && (
-        <Overlay open={false} backdrop={<OverlayBackdrop />}>
-          <OverlayCenter>
-            <FocusTrap
-              focusTrapOptions={{
-                initialFocus: false,
-                onDeactivate: handleRemoveUpload,
-                clickOutsideDeactivates: true,
-                escapeDeactivates: stopPropagation,
-              }}
-            >
-              <Modal className={ModalWide} variant="Surface" size="500">
-                <ImageEditor
-                  name={imageFile?.name ?? 'Unnamed'}
-                  url={imageFileURL}
-                  requestClose={handleRemoveUpload}
-                />
-              </Modal>
-            </FocusTrap>
-          </OverlayCenter>
-        </Overlay>
-      )}
-
-      <Overlay open={alertRemove} backdrop={<OverlayBackdrop />}>
-        <OverlayCenter>
-          <FocusTrap
-            focusTrapOptions={{
-              initialFocus: false,
-              onDeactivate: () => setAlertRemove(false),
-              clickOutsideDeactivates: true,
-              escapeDeactivates: stopPropagation,
-            }}
-          >
-            <Dialog variant="Surface">
-              <Header
-                style={{
-                  padding: `0 ${config.space.S200} 0 ${config.space.S400}`,
-                  borderBottomWidth: config.borderWidth.B300,
-                }}
-                variant="Surface"
-                size="500"
-              >
-                <Box grow="Yes">
-                  <Text size="H4">Remove Avatar</Text>
-                </Box>
-                <IconButton size="300" onClick={() => setAlertRemove(false)} radii="300">
-                  <Icon src={Icons.Cross} />
-                </IconButton>
-              </Header>
-              <Box style={{ padding: config.space.S400 }} direction="Column" gap="400">
-                <Box direction="Column" gap="200">
-                  <Text priority="400">Are you sure you want to remove profile avatar?</Text>
-                </Box>
-                <Button variant="Critical" onClick={handleRemoveAvatar}>
-                  <Text size="B400">Remove</Text>
-                </Button>
-              </Box>
-            </Dialog>
-          </FocusTrap>
-        </OverlayCenter>
-      </Overlay>
-    </SettingTile>
+    />
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function ProfileBanner({ profile, userId }: Readonly<ProfileProps>) {
+function ProfileBanner({ profile, userId }: Readonly<Pick<ProfileProps, 'profile' | 'userId'>>) {
   const mx = useMatrixClient();
+  const setGlobalProfiles = useSetAtom(profilesCacheAtom);
   const useAuthentication = useMediaAuthentication();
-  const [alertRemove, setAlertRemove] = useState(false);
-
   const [stagedUrl, setStagedUrl] = useState<string>();
   const [isRemoving, setIsRemoving] = useState(false);
 
@@ -256,31 +146,60 @@ function ProfileBanner({ profile, userId }: Readonly<ProfileProps>) {
   }, []);
 
   const handleUploaded = useCallback(
-    (upload: UploadSuccess) => {
+    async (upload: UploadSuccess) => {
       const { mxc } = upload;
 
       if (imageFileURL) setStagedUrl(imageFileURL);
-
-      mx.setExtendedProfileProperty?.('chat.commet.profile_banner', mxc);
       setImageFile(undefined);
+
+      try {
+        await mx.setExtendedProfileProperty?.(
+          prefix.MATRIX_UNSTABLE_PROFILE_BANNER_PROPERTY_NAME,
+          mxc
+        );
+      } catch (error) {
+        showErrorToast(
+          `Failed to save profile field: ${error instanceof Error ? error.message : String(error)}`
+        );
+        setStagedUrl(undefined);
+        return;
+      }
+      invalidateUserProfileCache(mx, userId, setGlobalProfiles);
     },
-    [mx, imageFileURL]
+    [mx, userId, imageFileURL, setGlobalProfiles]
   );
 
   const handleRemoveBanner = async () => {
-    setIsRemoving(true);
-    setStagedUrl(undefined);
-    setImageFile(undefined);
-
-    await mx.setExtendedProfileProperty?.('chat.commet.profile_banner', null);
-
-    setAlertRemove(false);
+    const ok = await confirm({
+      title: 'Remove Banner',
+      description: 'Are you sure you want to remove profile banner?',
+      action: 'Remove',
+      variant: 'Critical',
+    });
+    if (ok) {
+      setIsRemoving(true);
+      setStagedUrl(undefined);
+      setImageFile(undefined);
+      try {
+        await mx.setExtendedProfileProperty?.(
+          prefix.MATRIX_UNSTABLE_PROFILE_BANNER_PROPERTY_NAME,
+          null
+        );
+      } catch (error) {
+        showErrorToast(
+          `Failed to save profile field: ${error instanceof Error ? error.message : String(error)}`
+        );
+        setIsRemoving(false);
+        return;
+      }
+      invalidateUserProfileCache(mx, userId, setGlobalProfiles);
+    }
   };
 
   const previewUrl = isRemoving ? undefined : imageFileURL || stagedUrl || bannerUrl;
 
   return (
-    <SettingTile title="Banner">
+    <SettingTile title="Banner" focusId="banner">
       <Box direction="Column" gap="300" grow="Yes">
         <Box
           style={{
@@ -296,7 +215,7 @@ function ProfileBanner({ profile, userId }: Readonly<ProfileProps>) {
           }}
         >
           {previewUrl ? (
-            <img
+            <MediaImage
               src={previewUrl}
               key={previewUrl}
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
@@ -337,7 +256,7 @@ function ProfileBanner({ profile, userId }: Readonly<ProfileProps>) {
                 variant="Critical"
                 fill="None"
                 radii="300"
-                onClick={() => setAlertRemove(true)}
+                onClick={handleRemoveBanner}
               >
                 <Text size="B300">Remove</Text>
               </Button>
@@ -345,57 +264,30 @@ function ProfileBanner({ profile, userId }: Readonly<ProfileProps>) {
           </Box>
         )}
       </Box>
-
-      <Overlay open={alertRemove} backdrop={<OverlayBackdrop />}>
-        <OverlayCenter>
-          <FocusTrap
-            focusTrapOptions={{
-              initialFocus: false,
-              onDeactivate: () => setAlertRemove(false),
-              clickOutsideDeactivates: true,
-              escapeDeactivates: stopPropagation,
-            }}
-          >
-            <Dialog variant="Surface">
-              <Header
-                style={{
-                  padding: `0 ${config.space.S200} 0 ${config.space.S400}`,
-                  borderBottomWidth: config.borderWidth.B300,
-                }}
-                variant="Surface"
-                size="500"
-              >
-                <Box grow="Yes">
-                  <Text size="H4">Remove Banner</Text>
-                </Box>
-                <IconButton size="300" onClick={() => setAlertRemove(false)} radii="300">
-                  <Icon src={Icons.Cross} />
-                </IconButton>
-              </Header>
-              <Box style={{ padding: config.space.S400 }} direction="Column" gap="400">
-                <Text priority="400">Are you sure you want to remove profile banner?</Text>
-                <Button variant="Critical" onClick={handleRemoveBanner}>
-                  <Text size="B400">Remove</Text>
-                </Button>
-              </Box>
-            </Dialog>
-          </FocusTrap>
-        </OverlayCenter>
-      </Overlay>
     </SettingTile>
   );
 }
 
-function ProfileDisplayName({ profile, userId }: Readonly<ProfileProps>) {
+function ProfileDisplayName({ profile, userId, propagateTo }: Readonly<ProfileProps>) {
   const mx = useMatrixClient();
+  const setGlobalProfiles = useSetAtom(profilesCacheAtom);
   const capabilities = useCapabilities();
   const disableSetDisplayname = capabilities['m.set_displayname']?.enabled === false;
 
   const defaultDisplayName = profile.displayName ?? getMxIdLocalPart(userId) ?? userId;
-  const [displayName, setDisplayName] = useState<string>(defaultDisplayName);
+  const [displayName, setDisplayName] = useState(defaultDisplayName);
 
   const [changeState, changeDisplayName] = useAsyncCallback(
-    useCallback((name: string) => mx.setDisplayName(name), [mx])
+    useCallback(
+      async (name: string) => {
+        await setDisplayNameWithPropagation(mx, name, propagateTo);
+        setGlobalProfiles((prev) => ({
+          ...prev,
+          [userId]: { ...prev[userId], displayName: name },
+        }));
+      },
+      [mx, userId, propagateTo, setGlobalProfiles]
+    )
   );
   const changingDisplayName = changeState.status === AsyncStatus.Loading;
 
@@ -426,7 +318,7 @@ function ProfileDisplayName({ profile, userId }: Readonly<ProfileProps>) {
 
   const hasChanges = displayName !== defaultDisplayName;
   return (
-    <SettingTile title="Display Name">
+    <SettingTile title="Display Name" focusId="display-name">
       <Box direction="Column" grow="Yes" gap="100">
         <Box
           as="form"
@@ -454,7 +346,7 @@ function ProfileDisplayName({ profile, userId }: Readonly<ProfileProps>) {
                     radii="300"
                     variant="Secondary"
                   >
-                    <Icon src={Icons.Cross} size="100" />
+                    {menuIcon(X)}
                   </IconButton>
                 )
               }
@@ -478,6 +370,42 @@ function ProfileDisplayName({ profile, userId }: Readonly<ProfileProps>) {
   );
 }
 
+function ProfileChangePropagationSetting({ disabled }: { disabled: boolean }) {
+  const [profileChangePropagation, setProfileChangePropagation] = useSetting(
+    settingsAtom,
+    'profileChangePropagation'
+  );
+  const options: SettingMenuOption<ProfileChangePropagation>[] = [
+    { value: 'all', label: 'All rooms' },
+    { value: 'unchanged', label: 'Unchanged rooms' },
+    { value: 'none', label: 'Global only' },
+  ];
+
+  return (
+    <SequenceCard
+      className={SequenceCardStyle}
+      variant="SurfaceVariant"
+      direction="Column"
+      gap="400"
+      style={{ opacity: disabled ? 0.5 : 1 }}
+    >
+      <SettingTile
+        title="Profile change propagation"
+        focusId="profile-change-propagation"
+        description="Choose where global name and avatar changes are applied."
+        after={
+          <SettingMenuSelector
+            value={profileChangePropagation}
+            options={options}
+            onSelect={setProfileChangePropagation}
+            disabled={disabled}
+          />
+        }
+      />
+    </SequenceCard>
+  );
+}
+
 function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
   const mx = useMatrixClient();
   const setGlobalProfiles = useSetAtom(profilesCacheAtom);
@@ -487,7 +415,11 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
   const currentStatus = presence?.status || '';
 
   // Keys we don't render here nor handle seperately but still need to exclude
-  const EXCLUDED_KEYS = new Set(['kitty.meow.is_cat', 'kitty.meow.has_cats']);
+  const EXCLUDED_KEYS = new Set([
+    prefix.MATRIX_SABLE_UNSTABLE_ANIMAL_IDENTITY_IS_CAT_PROPERTY_NAME,
+    prefix.MATRIX_SABLE_UNSTABLE_ANIMAL_IDENTITY_HAS_CAT_PROPERTY_NAME,
+    prefix.MATRIX_SABLE_UNSTABLE_NAME_COLOR_PROPERTY_NAME,
+  ]);
 
   // Unknown fields / unimplemented non-matrix-spec fields
   // Only renders them, can't edit or set
@@ -496,13 +428,16 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
   );
 
   const handleSaveField = useCallback(
-    async (key: string, value: any) => {
-      await mx.setExtendedProfileProperty?.(key, value);
-      setGlobalProfiles((prev) => {
-        const newCache = { ...prev };
-        delete newCache[userId];
-        return newCache;
-      });
+    async (key: string, value: unknown) => {
+      try {
+        await mx.setExtendedProfileProperty?.(key, value);
+      } catch (error) {
+        showErrorToast(
+          `Failed to save profile field: ${error instanceof Error ? error.message : String(error)}`
+        );
+        return;
+      }
+      invalidateUserProfileCache(mx, userId, setGlobalProfiles);
     },
     [mx, userId, setGlobalProfiles]
   );
@@ -518,6 +453,36 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
     },
     [mx, presence]
   );
+
+  const colorOnDark =
+    profile.nameColors?.on_dark ??
+    (profile.extended?.[prefix.MATRIX_UNSTABLE_COLORS] as ColorSet | undefined)?.on_dark ??
+    null;
+  const colorOnLight =
+    profile.nameColors?.on_light ??
+    (profile.extended?.[prefix.MATRIX_UNSTABLE_COLORS] as ColorSet | undefined)?.on_light ??
+    null;
+  const [newColorOnDark, setNewColorOnDark] = useState<string | null>(null);
+  const [newColorOnLight, setNewColorOnLight] = useState<string | null>(null);
+
+  // Deletes the depricated key, the color specific ones should be depricated too at a later date
+  const legacyColor = profile.nameColor;
+  const migratedLegacyColor = useRef(false);
+  useEffect(() => {
+    if (!legacyColor || migratedLegacyColor.current) return;
+    migratedLegacyColor.current = true;
+
+    const migrate = async () => {
+      if (!colorOnDark || !colorOnLight) {
+        await handleSaveField(prefix.MATRIX_UNSTABLE_COLORS, {
+          on_dark: colorOnDark ?? legacyColor,
+          on_light: colorOnLight ?? legacyColor,
+        });
+      }
+      await handleSaveField(prefix.MATRIX_SABLE_UNSTABLE_NAME_COLOR_PROPERTY_NAME, null);
+    };
+    migrate();
+  }, [legacyColor, colorOnDark, colorOnLight, handleSaveField]);
 
   return (
     <Box direction="Column" gap="100">
@@ -537,11 +502,59 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
         gap="400"
       >
         <NameColorEditor
-          title="Global Name Color"
-          description="Custom name color everywhere names have color!"
-          current={profile.nameColor || profile.extended?.['moe.sable.app.name_color']}
-          onSave={(color) => handleSaveField('moe.sable.app.name_color', color)}
+          title="Dark theme Global Name Color"
+          description="Your name's color for a dark theme user."
+          focusId="name-color-dark-theme"
+          current={colorOnDark ?? undefined}
+          newNameColor={newColorOnDark ?? undefined}
+          onChange={setNewColorOnDark}
+          onSave={(color) =>
+            handleSaveField(prefix.MATRIX_UNSTABLE_COLORS, {
+              on_dark: color,
+              on_light: newColorOnLight,
+            })
+          }
         />
+        <NameColorEditor
+          title="Light theme Global Name Color"
+          description="Your name's color for a light theme user."
+          focusId="name-color-light-theme"
+          current={colorOnLight ?? undefined}
+          newNameColor={newColorOnLight ?? undefined}
+          onChange={setNewColorOnLight}
+          onSave={(color) =>
+            handleSaveField(prefix.MATRIX_UNSTABLE_COLORS, {
+              on_dark: newColorOnDark,
+              on_light: color,
+            })
+          }
+        />
+        {xor(newColorOnDark, newColorOnLight) && (
+          <Box direction="Column" alignItems="End">
+            {!newColorOnDark && newColorOnLight && (
+              <Button
+                size="300"
+                fill="Soft"
+                onClick={() => {
+                  setNewColorOnDark(accessibleColor(ThemeKind.Dark, newColorOnLight));
+                }}
+              >
+                <Text size="T200">Create new color from light theme</Text>
+              </Button>
+            )}
+            {newColorOnDark && !newColorOnLight && (
+              <Button
+                size="300"
+                fill="Soft"
+                onClick={() => {
+                  setNewColorOnLight(accessibleColor(ThemeKind.Light, newColorOnDark));
+                }}
+              >
+                <Text size="T200">Create new color from dark theme</Text>
+              </Button>
+            )}
+          </Box>
+        )}
       </SequenceCard>
       <SequenceCard
         className={SequenceCardStyle}
@@ -552,7 +565,7 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
         <PronounEditor
           title="Pronouns"
           current={pronouns}
-          onSave={(p) => handleSaveField('io.fsky.nyx.pronouns', p)}
+          onSave={(p) => handleSaveField(prefix.MATRIX_UNSTABLE_PROFILE_PRONOUNS_PROPERTY_NAME, p)}
         />
       </SequenceCard>
       <SequenceCard
@@ -564,8 +577,8 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
         <TimezoneEditor
           current={profile.timezone}
           onSave={(tz) => {
-            handleSaveField('us.cloke.msc4175.tz', tz);
-            handleSaveField('m.tz', tz);
+            handleSaveField(prefix.MATRIX_UNSTABLE_PROFILE_TIMEZONE_PROPERTY_NAME, tz);
+            handleSaveField(prefix.MATRIX_STABLE_PROFILE_TIMEZONE_PROPERTY_NAME, tz);
           }}
         />
       </SequenceCard>
@@ -577,16 +590,24 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
       >
         <BioEditor
           value={
-            (profile.extended?.['gay.fomx.biography'] satisfies MSC4440Bio)?.formatted_body ||
-            profile.extended?.['moe.sable.app.bio'] ||
-            profile.extended?.['chat.commet.profile_bio'] ||
+            (
+              profile.extended?.[prefix.MATRIX_UNSTABLE_PROFILE_BIOGRAPHY_PROPERTY_NAME] as
+                | MSC4440Bio
+                | undefined
+            )?.['m.text']?.[0]?.body ||
+            (profile.extended?.[prefix.MATRIX_SABLE_UNSTABLE_PROFILE_BIOGRAPHY_PROPERTY_NAME] as
+              | string
+              | undefined) ||
+            (profile.extended?.[prefix.MATRIX_COMMET_UNSTABLE_PROFILE_BIO_PROPERTY_NAME] as
+              | string
+              | undefined) ||
             profile.bio
           }
           onSave={(htmlBio, plainTextBio) => {
-            handleSaveField('moe.sable.app.bio', htmlBio);
+            handleSaveField(prefix.MATRIX_SABLE_UNSTABLE_PROFILE_BIOGRAPHY_PROPERTY_NAME, htmlBio);
 
             // MSC4440
-            handleSaveField('gay.fomx.biography', {
+            handleSaveField(prefix.MATRIX_UNSTABLE_PROFILE_BIOGRAPHY_PROPERTY_NAME, {
               'm.text': [
                 {
                   body: htmlBio,
@@ -599,12 +620,49 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
             } satisfies MSC4440Bio);
 
             const cleanedHtml = htmlBio.replaceAll('<br/></blockquote>', '</blockquote>');
-            handleSaveField('chat.commet.profile_bio', {
+            handleSaveField(prefix.MATRIX_COMMET_UNSTABLE_PROFILE_BIO_PROPERTY_NAME, {
               format: 'org.matrix.custom.html',
               formatted_body: cleanedHtml,
             });
           }}
         />
+      </SequenceCard>
+      <SequenceCard
+        className={SequenceCardStyle}
+        variant="SurfaceVariant"
+        direction="Column"
+        gap="400"
+      >
+        <NameColorEditor
+          title="Background Color"
+          description="The background color that will be used when making your profile card"
+          focusId="user-hero-color"
+          current={profile?.heroColorScheme?.color}
+          onSave={(color) =>
+            handleSaveField(prefix.MATRIX_COMMET_UNSTABLE_PROFILE_COLOR_SCHEME_PROPERTY_NAME, {
+              color,
+              brightness: color ? profile?.heroColorScheme?.brightness : null,
+            })
+          }
+        />
+        <IconButton
+          variant={profile?.heroColorScheme?.brightness === 'dark' ? 'Primary' : 'Warning'}
+          onClick={() =>
+            handleSaveField(prefix.MATRIX_COMMET_UNSTABLE_PROFILE_COLOR_SCHEME_PROPERTY_NAME, {
+              color: profile?.heroColorScheme?.color,
+              brightness: profile?.heroColorScheme?.brightness === 'dark' ? 'light' : 'dark',
+            })
+          }
+        >
+          <Box gap="200" direction="Row">
+            <Text truncate>
+              {profile?.heroColorScheme?.brightness === 'dark' ? 'Dark Mode' : 'Light Mode'}
+            </Text>
+            {profile?.heroColorScheme?.brightness === 'dark'
+              ? menuIcon(Star, { weight: 'fill' })
+              : menuIcon(Sun)}
+          </Box>
+        </IconButton>
       </SequenceCard>
 
       {extendedFields.length > 0 &&
@@ -629,6 +687,7 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
 
           return (
             <SequenceCard
+              key={key}
               className={SequenceCardStyle}
               variant="SurfaceVariant"
               direction="Column"
@@ -636,10 +695,20 @@ function ProfileExtended({ profile, userId }: Readonly<ProfileProps>) {
             >
               <SettingTile
                 key={key}
+                focusId={`profile-field-${toSettingsFocusIdPart(key)}`}
+                showSettingLinkAction={false}
                 title={key.split('.').pop() || key}
                 description={key}
                 after={
-                  <Text size="T300" truncate>
+                  <Text
+                    size="T300"
+                    style={{
+                      maxWidth: '40vw',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
                     {strVal}
                   </Text>
                 }
@@ -655,7 +724,13 @@ export function Profile() {
   const mx = useMatrixClient();
   const userId = mx.getUserId()!;
   const profile = useUserProfile(userId);
-
+  const { unstable_features: unstableFeatures } = useSpecVersions();
+  const supportsProfileChangePropagation =
+    unstableFeatures?.[prefix.MATRIX_UNSTABLE_MSC4466_FEATURE] === true;
+  const [profileChangePropagation] = useSetting(settingsAtom, 'profileChangePropagation');
+  const propagateTo: ProfileChangePropagation | undefined = supportsProfileChangePropagation
+    ? profileChangePropagation
+    : undefined;
   return (
     <Box direction="Column" gap="700">
       <Box direction="Column" gap="100">
@@ -666,7 +741,7 @@ export function Profile() {
           direction="Column"
           gap="400"
         >
-          <ProfileBanner userId={userId} profile={profile} />
+          <ProfileBanner profile={profile} userId={userId} />
         </SequenceCard>
         <SequenceCard
           className={SequenceCardStyle}
@@ -674,7 +749,7 @@ export function Profile() {
           direction="Column"
           gap="400"
         >
-          <ProfileAvatar userId={userId} profile={profile} />
+          <ProfileAvatar userId={userId} profile={profile} propagateTo={propagateTo} />
         </SequenceCard>
         <SequenceCard
           className={SequenceCardStyle}
@@ -682,8 +757,9 @@ export function Profile() {
           direction="Column"
           gap="400"
         >
-          <ProfileDisplayName userId={userId} profile={profile} />
+          <ProfileDisplayName userId={userId} profile={profile} propagateTo={propagateTo} />
         </SequenceCard>
+        <ProfileChangePropagationSetting disabled={!supportsProfileChangePropagation} />
       </Box>
       <ProfileExtended userId={userId} profile={profile} />
       <AnimalCosmetics userId={userId} profile={profile} />

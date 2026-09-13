@@ -13,15 +13,10 @@ export const UrlPreview = style([
   },
 ]);
 
-export const UrlPreviewImg = style([
+export const UrlPreviewMediaWell = style([
   DefaultReset,
   {
-    width: toRem(100),
-    height: toRem(100),
-    objectFit: 'cover',
-    objectPosition: 'center',
-    flexShrink: 0,
-    overflow: 'hidden',
+    backgroundColor: color.Surface.Container,
   },
 ]);
 

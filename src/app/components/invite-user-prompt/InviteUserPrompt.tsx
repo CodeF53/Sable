@@ -1,14 +1,7 @@
+import type { ChangeEventHandler, FormEventHandler, KeyboardEventHandler } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { Overlay } from '$components/overlay-stack';
 import {
-  ChangeEventHandler,
-  FormEventHandler,
-  KeyboardEventHandler,
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
-import {
-  Overlay,
   OverlayBackdrop,
   OverlayCenter,
   Box,
@@ -16,12 +9,7 @@ import {
   config,
   Text,
   IconButton,
-  Icon,
-  Icons,
   Input,
-  Button,
-  Spinner,
-  color,
   TextArea,
   Dialog,
   Menu,
@@ -29,19 +17,23 @@ import {
   Scroll,
   MenuItem,
 } from 'folds';
-import { Room } from '$types/matrix-sdk';
+import type { Room } from '$types/matrix-sdk';
 import { isKeyHotkey } from 'is-hotkey';
 import FocusTrap from 'focus-trap-react';
 import { stopPropagation } from '$utils/keyboard';
 import { useDirectUsers } from '$hooks/useDirectUsers';
-import { getMxIdLocalPart, getMxIdServer, isUserId } from '$utils/matrix';
-import { Membership } from '$types/matrix/room';
-import { useAsyncSearch, UseAsyncSearchOptions } from '$hooks/useAsyncSearch';
+import { getMxIdLocalPart, isUserId } from '$utils/matrix';
+import type { UseAsyncSearchOptions } from '$hooks/useAsyncSearch';
+import { useAsyncSearch } from '$hooks/useAsyncSearch';
 import { highlightText, makeHighlightRegex } from '$plugins/react-custom-html-parser';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
+import { AsyncError } from '$components/AsyncError';
+import { composerIcon, X } from '$components/icons/phosphor';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { BreakWord } from '$styles/Text.css';
 import { useAlive } from '$hooks/useAlive';
+import { getMxIdServer } from '$utils/mxIdHelper';
+import { KnownMembership } from '$types/matrix-sdk';
+import { Button } from '$components/button';
 
 const SEARCH_OPTIONS: UseAsyncSearchOptions = {
   limit: 1000,
@@ -67,7 +59,7 @@ export function InviteUserPrompt({ room, requestClose }: InviteUserProps) {
     () =>
       directUsers.filter((userId) => {
         const membership = room.getMember(userId)?.membership;
-        return membership !== Membership.Join;
+        return membership !== KnownMembership.Join;
       }),
     [directUsers, room]
   );
@@ -146,6 +138,7 @@ export function InviteUserPrompt({ room, requestClose }: InviteUserProps) {
     if (isKeyHotkey('tab', evt) && result && result.items.length > 0) {
       evt.preventDefault();
       const userId = result.items[0];
+      if (!userId) return;
       handleUserId(userId);
     }
   };
@@ -174,7 +167,7 @@ export function InviteUserPrompt({ room, requestClose }: InviteUserProps) {
                 </Box>
                 <Box shrink="No">
                   <IconButton size="300" radii="300" onClick={requestClose}>
-                    <Icon src={Icons.Cross} />
+                    {composerIcon(X)}
                   </IconButton>
                 </Box>
               </Header>
@@ -215,9 +208,20 @@ export function InviteUserPrompt({ room, requestClose }: InviteUserProps) {
                         }}
                       >
                         <Box style={{ position: 'relative' }}>
-                          <Menu style={{ position: 'absolute', top: 0, zIndex: 1, width: '100%' }}>
+                          <Menu
+                            style={{
+                              position: 'absolute',
+                              top: 0,
+                              zIndex: 1,
+                              width: '100%',
+                            }}
+                          >
                             <Scroll size="300" style={{ maxHeight: toRem(100) }}>
-                              <div style={{ padding: config.space.S100 }}>
+                              <div
+                                style={{
+                                  padding: config.space.S100,
+                                }}
+                              >
                                 {result.items.map((userId) => {
                                   const username = `${getMxIdLocalPart(userId)}`;
                                   const userServer = getMxIdServer(userId);
@@ -269,15 +273,14 @@ export function InviteUserPrompt({ room, requestClose }: InviteUserProps) {
                     resize="None"
                   />
                 </Box>
-                {inviteState.status === AsyncStatus.Error && (
-                  <Text size="T200" style={{ color: color.Critical.Main }} className={BreakWord}>
-                    <b>{inviteState.error.message}</b>
-                  </Text>
-                )}
+                <AsyncError state={inviteState} bold />
                 <Button
                   type="submit"
-                  disabled={!validUserId || inviting}
-                  before={inviting && <Spinner size="200" variant="Primary" fill="Solid" />}
+                  loading={inviting}
+                  spinnerSize="200"
+                  spinnerVariant="Primary"
+                  spinnerFill="Solid"
+                  disabled={!validUserId}
                 >
                   <Text size="B400">Invite</Text>
                 </Button>

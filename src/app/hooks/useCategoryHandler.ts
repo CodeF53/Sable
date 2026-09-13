@@ -1,13 +1,13 @@
-import { MouseEventHandler } from 'react';
+import type { MouseEventHandler } from 'react';
 
 type CategoryAction =
   | {
       type: 'PUT';
-      categoryId: string;
+      value: string;
     }
   | {
       type: 'DELETE';
-      categoryId: string;
+      value: string;
     };
 export const useCategoryHandler = (
   setAtom: (action: CategoryAction) => void,
@@ -17,10 +17,10 @@ export const useCategoryHandler = (
     const categoryId = evt.currentTarget.getAttribute('data-category-id');
     if (!categoryId) return;
     if (closed(categoryId)) {
-      setAtom({ type: 'DELETE', categoryId });
+      setAtom({ type: 'DELETE', value: categoryId });
       return;
     }
-    setAtom({ type: 'PUT', categoryId });
+    setAtom({ type: 'PUT', value: categoryId });
   };
 
   return handleCategoryClick;

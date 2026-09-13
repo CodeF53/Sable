@@ -1,5 +1,6 @@
 import { globalStyle, style } from '@vanilla-extract/css';
-import { RecipeVariants, recipe } from '@vanilla-extract/recipes';
+import type { RecipeVariants } from '@vanilla-extract/recipes';
+import { recipe } from '@vanilla-extract/recipes';
 import { DefaultReset, color, config, toRem } from 'folds';
 
 export const TimelineFloat = recipe({
@@ -11,6 +12,9 @@ export const TimelineFloat = recipe({
       transform: 'translateX(-50%)',
       zIndex: 10,
       minWidth: 'max-content',
+      overflow: 'hidden',
+      borderRadius: config.radii.Pill,
+      background: 'transparent',
     },
   ],
   variants: {
@@ -32,12 +36,13 @@ export type TimelineFloatVariants = RecipeVariants<typeof TimelineFloat>;
 export const messageList = style({
   overflowY: 'scroll',
   scrollbarGutter: 'stable',
+  overflowAnchor: 'none',
 
   '@supports': {
-    'not selector(::-webkit-scrollbar)': {
+    '(-moz-appearance: none)': {
       scrollbarWidth: 'auto',
       selectors: {
-        '&:hover, &:has(*:hover)': {
+        '&:hover': {
           scrollbarColor: `${color.SurfaceVariant.ContainerLine} ${color.SurfaceVariant.ContainerActive}`,
         },
       },
@@ -83,7 +88,6 @@ globalStyle(`body ${messageList} > *`, {
 });
 
 globalStyle(`body ${messageList} [data-message-id]`, {
-  overflowAnchor: 'auto',
   transition: 'background-color 0.1s ease-in-out !important',
   position: 'relative',
   zIndex: 1,

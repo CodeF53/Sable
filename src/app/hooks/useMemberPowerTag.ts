@@ -1,11 +1,14 @@
 import { useCallback, useMemo } from 'react';
-import { MatrixClient, Room, RoomMember } from '$types/matrix-sdk';
-import { MemberPowerTag, MemberPowerTagIcon } from '$types/matrix/room';
-import { accessibleColor } from '$plugins/color';
-import { getPowerLevelTag, PowerLevelTags, usePowerLevelTags } from './usePowerLevelTags';
-import { IPowerLevels, readPowerLevel } from './usePowerLevels';
+import type { MatrixClient, Room, RoomMember } from '$types/matrix-sdk';
+import type { MemberPowerTag, MemberPowerTagIcon } from '$types/matrix/room';
+import { useAccessibleNameColor } from './useAccessibleNameColor';
+import { mxcUrlToHttp } from '$utils/matrix';
+import type { PowerLevelTags } from './usePowerLevelTags';
+import { getPowerLevelTag, usePowerLevelTags } from './usePowerLevelTags';
+import type { IPowerLevels } from './usePowerLevels';
+import { readPowerLevel } from './usePowerLevels';
 import { useRoomCreatorsTag } from './useRoomCreatorsTag';
-import { ThemeKind } from './useTheme';
+import type { ThemeKind } from './useTheme';
 
 export type GetMemberPowerTag = (userId: string) => MemberPowerTag;
 
@@ -38,7 +41,7 @@ export const getPowerTagIconSrc = (
   icon: MemberPowerTagIcon
 ): string | undefined =>
   icon?.key?.startsWith('mxc://')
-    ? (mx.mxcUrlToHttp(icon.key, 96, 96, 'scale', undefined, undefined, useAuthentication) ?? '🌻')
+    ? (mxcUrlToHttp(mx, icon.key, useAuthentication, 96, 96, 'scale') ?? '🌻')
     : icon?.key;
 
 export const useAccessiblePowerTagColors = (
@@ -46,21 +49,23 @@ export const useAccessiblePowerTagColors = (
   creatorsTag: MemberPowerTag,
   powerLevelTags: PowerLevelTags
 ): Map<string, string> => {
+  const accessibleNameColor = useAccessibleNameColor(themeKind);
+
   const accessibleColors: Map<string, string> = useMemo(() => {
     const colors: Map<string, string> = new Map();
     if (creatorsTag.color) {
-      colors.set(creatorsTag.color, accessibleColor(themeKind, creatorsTag.color));
+      colors.set(creatorsTag.color, accessibleNameColor(creatorsTag.color) ?? creatorsTag.color);
     }
 
     Object.values(powerLevelTags).forEach((tag) => {
       const { color } = tag;
       if (!color) return;
 
-      colors.set(color, accessibleColor(themeKind, color));
+      colors.set(color, accessibleNameColor(color) ?? color);
     });
 
     return colors;
-  }, [powerLevelTags, creatorsTag, themeKind]);
+  }, [powerLevelTags, creatorsTag, accessibleNameColor]);
 
   return accessibleColors;
 };

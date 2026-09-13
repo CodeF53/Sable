@@ -1,52 +1,32 @@
-import {
-  KeyboardEventHandler,
-  MouseEventHandler,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react';
-import {
-  Box,
-  Chip,
-  Icon,
-  IconButton,
-  Icons,
-  Line,
-  PopOut,
-  RectCords,
-  Spinner,
-  Text,
-  as,
-  config,
-} from 'folds';
-import { Editor, Transforms } from 'slate';
-import { ReactEditor } from 'slate-react';
-import {
+import type { KeyboardEventHandler, MouseEventHandler, ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useAtomValue } from 'jotai';
+import type { RectCords } from 'folds';
+import { Box, Chip, IconButton, OverlayBackdrop, Spinner, Text, as, config } from 'folds';
+import { Overlay, PopOut } from '$components/overlay-stack';
+import { composerIcon, Smiley } from '$components/icons/phosphor';
+import type {
   IContent,
   IMentions,
   MatrixEvent,
-  ReplacementEvent,
-  RelationType,
   Room,
+  RoomMessageEventContent,
   RoomMessageTextEventContent,
-  MsgType,
 } from '$types/matrix-sdk';
+import { MsgType } from '$types/matrix-sdk';
 import { isKeyHotkey } from 'is-hotkey';
+import type { EditorDocument } from '$components/editor/model';
 import {
   AutocompletePrefix,
-  AutocompleteQuery,
+  useAutocompleteQuery,
   CustomEditor,
   EmoticonAutocomplete,
+  MarkdownFormattingToolbarBottom,
+  MarkdownFormattingToolbarToggle,
   RoomMentionAutocomplete,
-  Toolbar,
   UserMentionAutocomplete,
   createEmoticonElement,
   customHtmlEqualsPlainText,
-  getAutocompleteQuery,
-  getPrevWorldRange,
-  htmlToEditorInput,
-  moveCursor,
   plainToEditorInput,
   toMatrixCustomHTML,
   toPlainText,
@@ -54,25 +34,70 @@ import {
   useEditor,
   getMentions,
   ANYWHERE_AUTOCOMPLETE_PREFIXES,
+  getDocumentLinks,
+  LINKINPUTREGEX,
 } from '$components/editor';
+import { htmlToMarkdown } from '$plugins/markdown';
 import { useSetting } from '$state/hooks/settings';
 import { CaptionPosition, settingsAtom } from '$state/settings';
 import { UseStateProvider } from '$components/UseStateProvider';
 import { EmojiBoard } from '$components/emoji-board';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
 import { useMatrixClient } from '$hooks/useMatrixClient';
-import { getEditedEvent, getMentionContent, trimReplyFromFormattedBody } from '$utils/room';
-import { mobileOrTablet } from '$utils/user-agent';
+import { useDismissOnBack } from '$utils/androidBack';
+import { nicknamesAtom } from '$state/nicknames';
+import { getEditedEvent, getMentionContent } from '$utils/room/relations';
+import { trimReplyFromFormattedBody } from '$utils/room/display';
+import { buildReplacementContent } from '../buildReplacementContent';
+import { isMobileOrTablet } from '$utils/platform';
 import { useComposingCheck } from '$hooks/useComposingCheck';
 import { floatingEditor } from '$styles/overrides/Composer.css';
 import { RenderMessageContent } from '$components/RenderMessageContent';
+import { useSettingsLinkBaseUrl } from '$features/settings/useSettingsLinkBaseUrl';
 import { getReactCustomHtmlParser, LINKIFY_OPTS } from '$plugins/react-custom-html-parser';
+import { testMatrixTo } from '$plugins/matrix-to';
 import { useSpoilerClickHandler } from '$hooks/useSpoilerClickHandler';
-import { HTMLReactParserOptions } from 'html-react-parser';
+import type { HTMLReactParserOptions } from 'html-react-parser';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
-import { Opts as LinkifyOpts } from 'linkifyjs';
-import { GetContentCallback } from '$types/matrix/room';
-import { sanitizeCustomHtml } from '$utils/sanitize';
+import type { Opts as LinkifyOpts } from 'linkifyjs';
+import type { GetContentCallback } from '$types/matrix/room';
+import type { BundleContent } from '$components/message';
+import {
+  readdAngleBracketsForHiddenPreviews,
+  stripMarkdownEscapesForHiddenPreviews,
+} from './hiddenLinkPreviews';
+import { stripPerMessageProfileFormattedBody } from '$hooks/usePerMessageProfile';
+
+// Wraps the mobile emoji-board overlay so the Android back action closes it
+// instead of navigating away. Hooks can't run inside the UseStateProvider
+// render-prop below, so this component holds the back handler.
+function MobileEmojiOverlay({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useDismissOnBack(onClose, open);
+  return (
+    <Overlay open={open} backdrop={<OverlayBackdrop />}>
+      <div
+        style={{
+          position: 'fixed',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          display: 'flex',
+          justifyContent: 'center',
+        }}
+      >
+        {children}
+      </div>
+    </Overlay>
+  );
+}
 
 type MessageEditorProps = {
   roomId: string;
@@ -84,15 +109,14 @@ type MessageEditorProps = {
 export const MessageEditor = as<'div', MessageEditorProps>(
   ({ room, roomId, mEvent, imagePackRooms, onCancel, ...props }, ref) => {
     const mx = useMatrixClient();
+    const nicknames = useAtomValue(nicknamesAtom);
     const editor = useEditor();
     const [enterForNewline] = useSetting(settingsAtom, 'enterForNewline');
-    const [globalToolbar] = useSetting(settingsAtom, 'editorToolbar');
-    const [isMarkdown] = useSetting(settingsAtom, 'isMarkdown');
-    const [toolbar, setToolbar] = useState(globalToolbar);
+    const [pmpNoFallback] = useSetting(settingsAtom, 'pmpNoFallback');
     const isComposing = useComposingCheck();
 
-    const [autocompleteQuery, setAutocompleteQuery] =
-      useState<AutocompleteQuery<AutocompletePrefix>>();
+    const [autocompleteQuery, setAutocompleteQuery, handleCloseAutocomplete] =
+      useAutocompleteQuery(editor);
 
     const getPrevBodyAndFormattedBody = useCallback((): [
       string | undefined,
@@ -127,15 +151,65 @@ export const MessageEditor = as<'div', MessageEditorProps>(
       }
 
       if (pmpDisplayname && typeof customHtml === 'string') {
-        customHtml = customHtml.replace(
-          /^<strong\s+data-mx-profile-fallback[^>]*>.*?<\/strong>/,
-          ''
-        );
+        customHtml = stripPerMessageProfileFormattedBody(customHtml);
       }
 
+      const bundleContent =
+        (content['com.beeper.linkpreviews'] as BundleContent[] | undefined) ?? [];
+      const markHiddenLinks = (original: string, isHTML?: boolean) => {
+        if (!isHTML) {
+          return readdAngleBracketsForHiddenPreviews(original, bundleContent);
+        }
+        /* Split according to the following fule:
+              - if its not HTML just break it by spaces, newLines, and parans
+              - if it is HTML 
+                - break it before before any potential opening tag
+                - break it whenever a <a> tag starts
+                - break it after a closing </a> tag
+                - then for every non <a> portion find regular links as though it is plaintext
+                  * this is not recursive but needs flattening              
+         */
+        const splitBody = original.split(/(?=^.+<)|(?=<a.+)|(?<=\/a>)|(?=<code.+)|(?<=\/code>)/gi);
+        let newBody = '';
+        splitBody
+          .map((item) => (item.startsWith('<a') ? [item] : item.split(/(?=[ \n()])/g)))
+          .reduce((acc, current) => acc.concat(current), [])
+          .map((s) => {
+            // the length is from the fact that a link is necessarily longer than 6
+            if (s.length < 6 || s.startsWith('<code') || s.endsWith('code>')) {
+              newBody += s;
+              return;
+            }
+            // since the way that the match works the key is at the start of the string,
+            // it needs to be separated such that it can be reintroduced before the < in case of regular text
+            // or after it in case that it is matching a <a> tag
+            const strippedS = s.substring(1);
+            const matrixToAnchorHref =
+              isHTML && s.toLowerCase().startsWith('<a')
+                ? s.match(/href\s*=\s*["']([^"']+)["']/i)?.[1]
+                : undefined;
+            const urlFromChunk = strippedS.match(/https?:\/\/[^\s)]+/)?.[0];
+            const isMatrixToPermalink = testMatrixTo(matrixToAnchorHref ?? urlFromChunk ?? '');
+            const isHidden =
+              !isMatrixToPermalink &&
+              (bundleContent?.length === 0 ||
+                bundleContent.filter((b) => s.includes(b.matched_url)).length === 0) &&
+              strippedS.match(LINKINPUTREGEX) !== null;
+
+            // Wrap whole <a>…</a> as &lt;…&gt; once; duplicating the leading "<" breaks htmlToMarkdown's [<][a][>] detection.
+            if (isHidden && isHTML && s.toLowerCase().startsWith('<a')) {
+              newBody += `&lt;${s}&gt;`;
+              return;
+            }
+
+            newBody += `${isHidden ? (isHTML && `${s[0]}&lt;`) || `${s[0]}<` : s[0]}${strippedS}${isHidden ? (isHTML && '&gt;') || '>' : ''}`;
+          });
+        return newBody;
+      };
+
       return [
-        typeof body === 'string' ? body : undefined,
-        typeof customHtml === 'string' ? customHtml : undefined,
+        typeof body === 'string' ? markHiddenLinks(body) : undefined,
+        typeof customHtml === 'string' ? markHiddenLinks(customHtml, true) : undefined,
         mMentions,
       ];
     }, [room, mEvent]);
@@ -143,12 +217,12 @@ export const MessageEditor = as<'div', MessageEditorProps>(
     const [saveState, save] = useAsyncCallback(
       useCallback(async () => {
         const oldContent = mEvent.getContent();
-        let plainText = toPlainText(editor.children, isMarkdown).trim();
+        const msgtype = mEvent.getContent().msgtype as RoomMessageTextEventContent['msgtype'];
+        let plainText = toPlainText(editor.children as EditorDocument).trim();
         let customHtml = trimCustomHtml(
-          toMatrixCustomHTML(editor.children, {
-            allowTextFormatting: true,
-            allowBlockMarkdown: isMarkdown,
-            allowInlineMarkdown: isMarkdown,
+          toMatrixCustomHTML(editor.children as EditorDocument, {
+            forEmote: msgtype === MsgType.Emote,
+            room,
           })
         );
 
@@ -171,13 +245,6 @@ export const MessageEditor = as<'div', MessageEditorProps>(
           }
         }
 
-        const msgtype = mEvent.getContent().msgtype as RoomMessageTextEventContent['msgtype'];
-
-        const newContent: IContent = {
-          msgtype,
-          body: plainText,
-        };
-
         const evtId = mEvent.getId();
         const evtTimeline = evtId ? room.getTimelineForEvent(evtId) : undefined;
         const editedEvent =
@@ -189,83 +256,34 @@ export const MessageEditor = as<'div', MessageEditorProps>(
           editedEvent?.getContent()?.['m.new_content']?.['com.beeper.per_message_profile'] ??
           mEvent.getContent()?.['com.beeper.per_message_profile'];
 
-        const pmpDisplayname =
-          rawPmp !== null &&
-          typeof rawPmp === 'object' &&
-          'displayname' in rawPmp &&
-          typeof rawPmp.displayname === 'string' &&
-          rawPmp.displayname.length > 0
-            ? (rawPmp.displayname as string)
-            : undefined;
-
-        if (pmpDisplayname) {
-          const bodyPrefix = `${pmpDisplayname}: `;
-          if (!plainText.startsWith(bodyPrefix)) {
-            plainText = bodyPrefix + plainText;
-          }
-
-          const escapedName = sanitizeCustomHtml(pmpDisplayname);
-          const htmlPrefix = `<strong data-mx-profile-fallback>${escapedName}: </strong>`;
-          if (!customHtml.startsWith(htmlPrefix)) {
-            customHtml = htmlPrefix + customHtml;
-          }
-
-          newContent['com.beeper.per_message_profile'] = rawPmp;
-        }
-
-        const contentBody: IContent & Omit<ReplacementEvent<IContent>, 'm.relates_to'> = {
-          msgtype,
-          body: `* ${plainText}`,
-          'm.new_content': newContent,
-        };
-
-        const mentionData = getMentions(mx, roomId, editor);
+        const mentionData = getMentions(mx, roomId, {
+          children: editor.children as EditorDocument,
+        });
 
         prevMentions?.user_ids?.forEach((prevMentionId) => {
           mentionData.users.add(prevMentionId);
         });
 
         const mMentions = getMentionContent(Array.from(mentionData.users), mentionData.room);
-        newContent['m.mentions'] = mMentions;
-        contentBody['m.mentions'] = mMentions;
 
-        if (!customHtmlEqualsPlainText(customHtml, plainText)) {
-          newContent.format = 'org.matrix.custom.html';
-          newContent.formatted_body = customHtml;
-          contentBody.format = 'org.matrix.custom.html';
-          contentBody.formatted_body = `* ${customHtml}`;
-        }
+        const linkPreviews =
+          getDocumentLinks(editor.children as EditorDocument)?.map((matchedUrl) => ({
+            matched_url: matchedUrl,
+          })) ?? [];
 
-        const content: IContent = {
-          ...oldContent,
-          'm.relates_to': {
-            event_id: eventId,
-            rel_type: RelationType.Replace,
-          },
-        };
-        content.body = contentBody.body;
-        content.format = contentBody.format;
-        content.formatted_body = contentBody.formatted_body;
-        content['m.new_content'] = newContent;
-        if (oldContent.info !== undefined && oldContent.filename?.length > 0) {
-          content.filename = oldContent.filename;
-          content['m.new_content'].filename = oldContent.filename;
-          content.info = oldContent.info;
-          content['m.new_content'].info = oldContent.info;
+        const content = buildReplacementContent(
+          oldContent,
+          plainText,
+          customHtml,
+          eventId,
+          mMentions,
+          linkPreviews,
+          rawPmp,
+          pmpNoFallback
+        );
 
-          if (oldContent.file !== undefined) content['m.new_content'].file = oldContent.file;
-          if (oldContent.url !== undefined) content['m.new_content'].url = oldContent.url;
-
-          if (oldContent['page.codeberg.everypizza.msc4193.spoiler'] !== undefined) {
-            content['page.codeberg.everypizza.msc4193.spoiler'] =
-              oldContent['page.codeberg.everypizza.msc4193.spoiler'];
-            content['m.new_content']['page.codeberg.everypizza.msc4193.spoiler'] =
-              oldContent['page.codeberg.everypizza.msc4193.spoiler'];
-          }
-        }
-
-        return mx.sendMessage(roomId, content as any);
-      }, [mx, editor, roomId, mEvent, isMarkdown, getPrevBodyAndFormattedBody, room])
+        return mx.sendMessage(roomId, content as RoomMessageEventContent);
+      }, [mx, editor, roomId, mEvent, getPrevBodyAndFormattedBody, room, pmpNoFallback])
     );
 
     const handleSave = useCallback(() => {
@@ -274,18 +292,21 @@ export const MessageEditor = as<'div', MessageEditorProps>(
       }
     }, [saveState, save]);
 
+    const suppressBlurRefocusRef = useRef(false);
+    const suppressEditorRefocus = useCallback(() => {
+      suppressBlurRefocusRef.current = true;
+      requestAnimationFrame(() => {
+        suppressBlurRefocusRef.current = false;
+      });
+    }, []);
+
     const handleKeyDown: KeyboardEventHandler = useCallback(
       (evt) => {
         if (
           (isKeyHotkey('mod+enter', evt) || (!enterForNewline && isKeyHotkey('enter', evt))) &&
           !isComposing(evt)
         ) {
-          const prevWordRange = getPrevWorldRange(editor);
-          if (
-            prevWordRange &&
-            getAutocompleteQuery(editor, prevWordRange, ANYWHERE_AUTOCOMPLETE_PREFIXES)
-          )
-            return;
+          if (editor.getAutocompleteQuery(ANYWHERE_AUTOCOMPLETE_PREFIXES)) return;
 
           evt.preventDefault();
           handleSave();
@@ -298,6 +319,10 @@ export const MessageEditor = as<'div', MessageEditorProps>(
       [enterForNewline, isComposing, editor, handleSave, onCancel]
     );
 
+    const detectAutocomplete = useCallback(() => {
+      setAutocompleteQuery(editor.getAutocompleteQuery(ANYWHERE_AUTOCOMPLETE_PREFIXES));
+    }, [editor, setAutocompleteQuery]);
+
     const handleKeyUp: KeyboardEventHandler = useCallback(
       (evt) => {
         if (isKeyHotkey('escape', evt)) {
@@ -305,41 +330,36 @@ export const MessageEditor = as<'div', MessageEditorProps>(
           return;
         }
 
-        const prevWordRange = getPrevWorldRange(editor);
-        const query = prevWordRange
-          ? getAutocompleteQuery(editor, prevWordRange, ANYWHERE_AUTOCOMPLETE_PREFIXES)
-          : undefined;
-        setAutocompleteQuery(query);
+        detectAutocomplete();
       },
-      [editor]
+      [detectAutocomplete]
     );
 
-    const handleCloseAutocomplete = useCallback(() => {
-      ReactEditor.focus(editor);
-      setAutocompleteQuery(undefined);
-    }, [editor]);
-
     const handleEmoticonSelect = (key: string, shortcode: string) => {
-      editor.insertNode(createEmoticonElement(key, shortcode));
-      moveCursor(editor);
+      editor.insertInline(createEmoticonElement(key, shortcode));
+      editor.insertText(' ');
     };
 
     useEffect(() => {
       const [body, customHtml] = getPrevBodyAndFormattedBody();
 
-      const initialValue =
-        typeof customHtml === 'string'
-          ? htmlToEditorInput(customHtml, isMarkdown)
-          : plainToEditorInput(typeof body === 'string' ? body : '', isMarkdown);
+      const mentionOptions = {
+        room,
+        nicknames,
+        mxUserId: mx.getUserId() ?? undefined,
+      };
+      const initialValue = plainToEditorInput(
+        customHtml
+          ? stripMarkdownEscapesForHiddenPreviews(htmlToMarkdown(customHtml))
+          : typeof body === 'string'
+            ? stripMarkdownEscapesForHiddenPreviews(body)
+            : '',
+        mentionOptions
+      );
 
-      Transforms.select(editor, {
-        anchor: Editor.start(editor, []),
-        focus: Editor.end(editor, []),
-      });
-
-      editor.insertFragment(initialValue);
-      if (!mobileOrTablet()) ReactEditor.focus(editor);
-    }, [editor, getPrevBodyAndFormattedBody, isMarkdown]);
+      editor.setDocument(initialValue);
+      if (!isMobileOrTablet()) editor.focus();
+    }, [editor, getPrevBodyAndFormattedBody, room, nicknames, mx]);
 
     useEffect(() => {
       if (saveState.status === AsyncStatus.Success) {
@@ -348,16 +368,37 @@ export const MessageEditor = as<'div', MessageEditorProps>(
     }, [saveState, onCancel]);
 
     const useAuthentication = useMediaAuthentication();
+    const settingsLinkBaseUrl = useSettingsLinkBaseUrl();
     const linkifyOpts = useMemo<LinkifyOpts>(() => ({ ...LINKIFY_OPTS }), []);
     const spoilerClickHandler = useSpoilerClickHandler();
+    const [incomingInlineImagesDefaultHeight] = useSetting(
+      settingsAtom,
+      'incomingInlineImagesDefaultHeight'
+    );
+    const [incomingInlineImagesMaxHeight] = useSetting(
+      settingsAtom,
+      'incomingInlineImagesMaxHeight'
+    );
     const htmlReactParserOptions = useMemo<HTMLReactParserOptions>(
       () =>
         getReactCustomHtmlParser(mx, mEvent.getRoomId(), {
+          settingsLinkBaseUrl,
           linkifyOpts,
           useAuthentication,
           handleSpoilerClick: spoilerClickHandler,
+          incomingInlineImagesDefaultHeight,
+          incomingInlineImagesMaxHeight,
         }),
-      [linkifyOpts, mEvent, mx, spoilerClickHandler, useAuthentication]
+      [
+        linkifyOpts,
+        mEvent,
+        mx,
+        settingsLinkBaseUrl,
+        spoilerClickHandler,
+        useAuthentication,
+        incomingInlineImagesDefaultHeight,
+        incomingInlineImagesMaxHeight,
+      ]
     );
     const getContent = (() => mEvent.getContent()) as GetContentCallback;
     const msgType = mEvent.getContent().msgtype;
@@ -373,24 +414,24 @@ export const MessageEditor = as<'div', MessageEditorProps>(
         {autocompleteQuery?.prefix === AutocompletePrefix.RoomMention && (
           <RoomMentionAutocomplete
             roomId={roomId}
-            editor={editor}
-            query={autocompleteQuery}
+            controller={editor}
+            query={autocompleteQuery!}
             requestClose={handleCloseAutocomplete}
           />
         )}
         {autocompleteQuery?.prefix === AutocompletePrefix.UserMention && (
           <UserMentionAutocomplete
             room={room}
-            editor={editor}
-            query={autocompleteQuery}
+            controller={editor}
+            query={autocompleteQuery!}
             requestClose={handleCloseAutocomplete}
           />
         )}
         {autocompleteQuery?.prefix === AutocompletePrefix.Emoticon && (
           <EmoticonAutocomplete
             imagePackRooms={imagePackRooms || []}
-            editor={editor}
-            query={autocompleteQuery}
+            controller={editor}
+            query={autocompleteQuery!}
             requestClose={handleCloseAutocomplete}
           />
         )}
@@ -412,6 +453,7 @@ export const MessageEditor = as<'div', MessageEditorProps>(
               htmlReactParserOptions={htmlReactParserOptions}
               hideCaption
               linkifyOpts={linkifyOpts}
+              room={room}
             />
           )}
           <Box
@@ -442,10 +484,12 @@ export const MessageEditor = as<'div', MessageEditorProps>(
             <CustomEditor
               editor={editor}
               placeholder="Edit message..."
+              suppressBlurRefocusRef={suppressBlurRefocusRef}
               onKeyDown={handleKeyDown}
               onKeyUp={handleKeyUp}
               bottom={
                 <>
+                  <MarkdownFormattingToolbarBottom controller={editor} />
                   <Box
                     style={{ padding: config.space.S200, paddingTop: 0 }}
                     alignItems="End"
@@ -455,6 +499,7 @@ export const MessageEditor = as<'div', MessageEditorProps>(
                     <Box gap="Inherit">
                       <Chip
                         onClick={handleSave}
+                        onPointerDown={suppressEditorRefocus}
                         variant="Primary"
                         radii="Pill"
                         disabled={saveState.status === AsyncStatus.Loading}
@@ -467,44 +512,38 @@ export const MessageEditor = as<'div', MessageEditorProps>(
                       >
                         <Text size="B300">Save</Text>
                       </Chip>
-                      <Chip onClick={onCancel} variant="SurfaceVariant" radii="Pill">
+                      <Chip
+                        onClick={onCancel}
+                        onPointerDown={suppressEditorRefocus}
+                        variant="SurfaceVariant"
+                        radii="Pill"
+                      >
                         <Text size="B300">Cancel</Text>
                       </Chip>
                     </Box>
                     <Box gap="Inherit">
-                      <IconButton
-                        variant="SurfaceVariant"
-                        size="300"
-                        radii="300"
-                        onClick={() => setToolbar(!toolbar)}
-                      >
-                        <Icon size="400" src={toolbar ? Icons.AlphabetUnderline : Icons.Alphabet} />
-                      </IconButton>
+                      <MarkdownFormattingToolbarToggle variant="SurfaceVariant" />
                       <UseStateProvider initial={undefined}>
-                        {(anchor: RectCords | undefined, setAnchor) => (
-                          <PopOut
-                            anchor={anchor}
-                            alignOffset={-8}
-                            position="Top"
-                            align="End"
-                            content={
-                              <EmojiBoard
-                                imagePackRooms={imagePackRooms ?? []}
-                                returnFocusOnDeactivate={false}
-                                onEmojiSelect={handleEmoticonSelect}
-                                onCustomEmojiSelect={handleEmoticonSelect}
-                                requestClose={() => {
-                                  setAnchor((v) => {
-                                    if (v) {
-                                      if (!mobileOrTablet()) ReactEditor.focus(editor);
-                                      return undefined;
-                                    }
-                                    return v;
-                                  });
-                                }}
-                              />
-                            }
-                          >
+                        {(anchor: RectCords | undefined, setAnchor) => {
+                          const emojiBoard = (
+                            <EmojiBoard
+                              imagePackRooms={imagePackRooms ?? []}
+                              returnFocusOnDeactivate={false}
+                              isFullWidth={isMobileOrTablet()}
+                              onEmojiSelect={handleEmoticonSelect}
+                              onCustomEmojiSelect={handleEmoticonSelect}
+                              requestClose={() => {
+                                setAnchor((v) => {
+                                  if (v) {
+                                    if (!isMobileOrTablet()) editor.focus();
+                                    return undefined;
+                                  }
+                                  return v;
+                                });
+                              }}
+                            />
+                          );
+                          const trigger = (
                             <IconButton
                               aria-pressed={anchor !== undefined}
                               onClick={
@@ -513,23 +552,44 @@ export const MessageEditor = as<'div', MessageEditorProps>(
                                     evt.currentTarget.getBoundingClientRect()
                                   )) as MouseEventHandler<HTMLButtonElement>
                               }
+                              onPointerDown={suppressEditorRefocus}
                               variant="SurfaceVariant"
                               size="300"
                               radii="300"
                             >
-                              <Icon size="400" src={Icons.Smile} filled={anchor !== undefined} />
+                              {composerIcon(Smiley, {
+                                weight: anchor !== undefined ? 'fill' : 'regular',
+                              })}
                             </IconButton>
-                          </PopOut>
-                        )}
+                          );
+                          if (isMobileOrTablet()) {
+                            return (
+                              <>
+                                {trigger}
+                                <MobileEmojiOverlay
+                                  open={anchor !== undefined}
+                                  onClose={() => setAnchor(undefined)}
+                                >
+                                  {emojiBoard}
+                                </MobileEmojiOverlay>
+                              </>
+                            );
+                          }
+                          return (
+                            <PopOut
+                              anchor={anchor}
+                              alignOffset={-8}
+                              position="Top"
+                              align="End"
+                              content={emojiBoard}
+                            >
+                              {trigger}
+                            </PopOut>
+                          );
+                        }}
                       </UseStateProvider>
                     </Box>
                   </Box>
-                  {toolbar && (
-                    <div>
-                      <Line variant="SurfaceVariant" size="300" />
-                      <Toolbar />
-                    </div>
-                  )}
                 </>
               }
             />

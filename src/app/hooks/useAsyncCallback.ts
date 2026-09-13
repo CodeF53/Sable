@@ -1,4 +1,5 @@
-import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { useAlive } from './useAlive';
 
@@ -73,7 +74,7 @@ export const useAsync = <TData, TError, TArgs extends unknown[]>(
             });
           });
         }
-        throw e;
+        return undefined as never;
       }
 
       if (currentReqNumber !== reqNumberRef.current) return undefined as never;

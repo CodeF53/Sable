@@ -1,21 +1,20 @@
 import { Box, Input, Switch, Text } from 'folds';
 import { SettingTile } from '$components/setting-tile';
-import { SequenceCard } from '$components/sequence-card';
+import { SequenceCard, SequenceCardStyle } from '$components/sequence-card';
 import { useEffect, useState } from 'react';
 import { getSettings, setSettings } from '$state/settings';
-import { SequenceCardStyle } from '../styles.css';
 
-export type LanguageSpecificPronounsConfig = {
+type LanguageSpecificPronounsConfig = {
   enabled?: boolean | string;
   languages?: string[];
 };
 
-export const resolveLanguageSpecificPronounsEnabled = (
+const resolveLanguageSpecificPronounsEnabled = (
   enabled: LanguageSpecificPronounsConfig['enabled']
 ): boolean => {
   if (enabled === undefined) return false;
   if (typeof enabled === 'boolean') return enabled;
-  const normalized = String(enabled).trim().toLowerCase();
+  const normalized = enabled.trim().toLowerCase();
   if (normalized === 'false' || normalized === '0' || normalized === 'off' || normalized === 'no')
     return false;
   if (normalized === 'true' || normalized === '1' || normalized === 'on' || normalized === 'yes')
@@ -78,6 +77,7 @@ export function LanguageSpecificPronouns() {
       >
         <SettingTile
           title="Show pronouns only in selected language"
+          focusId="show-pronouns-only-in-selected-language"
           description="If enabled, pronouns are only shown when they match your selected language. This helps if your contacts set pronouns in different languages. It doesn't affect how your pronouns are shared with others."
           after={
             <Switch
@@ -90,6 +90,7 @@ export function LanguageSpecificPronouns() {
         {useLanguageSpecificPronouns && (
           <SettingTile
             title="Selected language for pronouns"
+            focusId="selected-language-for-pronouns"
             description="The language to show pronouns for when the above setting is enabled."
             after={
               <Input

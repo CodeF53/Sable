@@ -1,30 +1,18 @@
-import { MouseEventHandler, useCallback, useState } from 'react';
-import {
-  Badge,
-  Box,
-  Button,
-  Chip,
-  config,
-  Icon,
-  Icons,
-  Spinner,
-  Text,
-  Overlay,
-  OverlayBackdrop,
-  OverlayCenter,
-  IconButton,
-  RectCords,
-  PopOut,
-  Menu,
-  MenuItem,
-} from 'folds';
+import type { MouseEventHandler } from 'react';
+import { useCallback, useState } from 'react';
+import { isTauri } from '@tauri-apps/api/core';
+import type { RectCords } from 'folds';
+import { Badge, Box, Button, Chip, config, Spinner, Text, IconButton, Menu, MenuItem } from 'folds';
+import { PopOut } from '$components/overlay-stack';
+import { DotsThreeOutlineVerticalIcon, menuIcon, X } from '$components/icons/phosphor';
 import FocusTrap from 'focus-trap-react';
-import { CryptoApi, VerificationRequest } from '$types/matrix-sdk';
+import type { CryptoApi, VerificationRequest } from '$types/matrix-sdk';
 import { VerificationStatus } from '$hooks/useDeviceVerificationStatus';
 import { InfoCard } from '$components/info-card';
 import { ManualVerificationTile } from '$components/ManualVerification';
-import { SecretStorageKeyContent } from '$types/matrix/accountData';
-import { AsyncState, AsyncStatus, useAsync } from '$hooks/useAsyncCallback';
+import type { SecretStorageKeyContent } from '$types/matrix/accountData';
+import type { AsyncState } from '$hooks/useAsyncCallback';
+import { AsyncStatus, useAsync } from '$hooks/useAsyncCallback';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { DeviceVerification } from '$components/DeviceVerification';
 import {
@@ -33,8 +21,10 @@ import {
 } from '$components/DeviceVerificationSetup';
 import { stopPropagation } from '$utils/keyboard';
 import { useAuthMetadata } from '$hooks/useAuthMetadata';
-import { withSearchParam } from '$pages/pathUtils';
-import { useAccountManagementActions } from '$hooks/useAccountManagement';
+import { getAccountManagementUrl, useAccountManagementActions } from '$hooks/useAccountManagement';
+import { ModalOverlay } from '$components/modal-overlay/ModalOverlay';
+import { verificationClockWarning } from '$utils/clockSkew';
+import { showErrorToast } from '$state/toast';
 
 type VerificationStatusBadgeProps = {
   verificationStatus: VerificationStatus;
@@ -73,7 +63,20 @@ export function VerificationStatusBadge({
   );
 }
 
-function LearnStartVerificationFromOtherDevice() {
+const describeOptions = (canVerifyWithDevice: boolean, canVerifyManually: boolean): string => {
+  if (canVerifyWithDevice && canVerifyManually) {
+    return 'Verify with another device or verify manually.';
+  }
+  if (canVerifyWithDevice) return 'Verify with another device.';
+  if (canVerifyManually) return 'Verify manually with your recovery key.';
+  return 'No verified device and no recovery key: reset device verification to start over.';
+};
+
+function LearnStartVerificationFromOtherDevice({
+  canVerifyManually,
+}: {
+  canVerifyManually: boolean;
+}) {
   return (
     <Box direction="Column">
       <Text size="T200">Steps to verify from other device.</Text>
@@ -89,25 +92,54 @@ function LearnStartVerificationFromOtherDevice() {
           <li>Initiate verification.</li>
         </ul>
       </Text>
-      <Text size="T200">
-        If you do not have any verified device press the <i>&quot;Verify Manually&quot;</i> button.
-      </Text>
+      {canVerifyManually && (
+        <Text size="T200">
+          If you do not have any verified device press the <i>&quot;Verify Manually&quot;</i>{' '}
+          button.
+        </Text>
+      )}
     </Box>
   );
 }
 
 type VerifyCurrentDeviceTileProps = {
-  secretStorageKeyId: string;
-  secretStorageKeyContent: SecretStorageKeyContent;
+  secretStorageKeyId?: string;
+  secretStorageKeyContent?: SecretStorageKeyContent;
+  hasVerifiedOtherDevice?: boolean;
 };
 export function VerifyCurrentDeviceTile({
   secretStorageKeyId,
   secretStorageKeyContent,
+  hasVerifiedOtherDevice = false,
 }: VerifyCurrentDeviceTileProps) {
+  const mx = useMatrixClient();
   const [learnMore, setLearnMore] = useState(false);
 
   const [manualVerification, setManualVerification] = useState(false);
   const handleCancelVerification = () => setManualVerification(false);
+
+  const [requestState, setRequestState] = useState<AsyncState<VerificationRequest, Error>>({
+    status: AsyncStatus.Idle,
+  });
+  const requestVerification = useAsync<VerificationRequest, Error, []>(
+    useCallback(async () => {
+      const crypto = mx.getCrypto();
+      if (!crypto) throw new Error('Unexpected Error! Crypto object not found.');
+      const clockWarning = await verificationClockWarning(mx.baseUrl);
+      if (clockWarning) {
+        showErrorToast(clockWarning, 8000);
+        throw new Error(clockWarning);
+      }
+      return crypto.requestOwnUserVerification();
+    }, [mx]),
+    setRequestState
+  );
+  const handleExitVerification = useCallback(() => {
+    setRequestState({ status: AsyncStatus.Idle });
+  }, []);
+  const requesting = requestState.status === AsyncStatus.Loading;
+  const canVerifyManually = Boolean(secretStorageKeyId && secretStorageKeyContent);
+  const canVerifyWithDevice = hasVerifiedOtherDevice;
 
   return (
     <>
@@ -116,32 +148,58 @@ export function VerifyCurrentDeviceTile({
         title="Unverified"
         description={
           <>
-            Start verification from other device or verify manually.{' '}
+            {describeOptions(canVerifyWithDevice, canVerifyManually)}{' '}
             <Text as="a" size="T200" onClick={() => setLearnMore(!learnMore)}>
               <b>{learnMore ? 'View Less' : 'Learn More'}</b>
             </Text>
           </>
         }
         after={
-          !manualVerification && (
-            <Button
-              size="300"
-              variant="Critical"
-              fill="Soft"
-              radii="300"
-              outlined
-              onClick={() => setManualVerification(true)}
-            >
-              <Text as="span" size="B300">
-                Verify Manually
-              </Text>
-            </Button>
+          !(manualVerification && canVerifyManually) && (
+            <Box gap="200" alignItems="Center">
+              {canVerifyWithDevice && (
+                <Button
+                  size="300"
+                  variant="Critical"
+                  radii="300"
+                  onClick={requestVerification}
+                  before={requesting && <Spinner size="100" variant="Critical" fill="Solid" />}
+                  disabled={requesting}
+                >
+                  <Text as="span" size="B300">
+                    Verify with Device
+                  </Text>
+                </Button>
+              )}
+              {canVerifyManually && (
+                <Button
+                  size="300"
+                  variant="Critical"
+                  fill="Soft"
+                  radii="300"
+                  outlined
+                  onClick={() => setManualVerification(true)}
+                >
+                  <Text as="span" size="B300">
+                    Verify Manually
+                  </Text>
+                </Button>
+              )}
+            </Box>
           )
         }
       >
-        {learnMore && <LearnStartVerificationFromOtherDevice />}
+        {learnMore && (
+          <LearnStartVerificationFromOtherDevice canVerifyManually={canVerifyManually} />
+        )}
+        {requestState.status === AsyncStatus.Error && (
+          <Text size="T200">{requestState.error.message}</Text>
+        )}
+        {requestState.status === AsyncStatus.Success && (
+          <DeviceVerification request={requestState.data} onExit={handleExitVerification} />
+        )}
       </InfoCard>
-      {manualVerification && (
+      {manualVerification && secretStorageKeyId && secretStorageKeyContent && (
         <ManualVerificationTile
           secretStorageKeyId={secretStorageKeyId}
           secretStorageKeyContent={secretStorageKeyContent}
@@ -153,7 +211,7 @@ export function VerifyCurrentDeviceTile({
               radii="Pill"
               onClick={handleCancelVerification}
             >
-              <Icon size="100" src={Icons.Cross} />
+              {menuIcon(X)}
             </Chip>
           }
         />
@@ -173,9 +231,13 @@ export function VerifyOtherDeviceTile({ crypto, deviceId }: VerifyOtherDeviceTil
   });
 
   const requestVerification = useAsync<VerificationRequest, Error, []>(
-    useCallback(() => {
-      const requestPromise = crypto.requestDeviceVerification(mx.getSafeUserId(), deviceId);
-      return requestPromise;
+    useCallback(async () => {
+      const clockWarning = await verificationClockWarning(mx.baseUrl);
+      if (clockWarning) {
+        showErrorToast(clockWarning, 8000);
+        throw new Error(clockWarning);
+      }
+      return crypto.requestDeviceVerification(mx.getSafeUserId(), deviceId);
     }, [mx, crypto, deviceId]),
     setRequestState
   );
@@ -219,8 +281,9 @@ export function VerifyOtherDeviceTile({ crypto, deviceId }: VerifyOtherDeviceTil
 
 type EnableVerificationProps = {
   visible: boolean;
+  loading?: boolean;
 };
-export function EnableVerification({ visible }: EnableVerificationProps) {
+export function EnableVerification({ visible, loading }: EnableVerificationProps) {
   const [open, setOpen] = useState(false);
 
   const handleCancel = useCallback(() => setOpen(false), []);
@@ -228,26 +291,26 @@ export function EnableVerification({ visible }: EnableVerificationProps) {
   return (
     <>
       {visible && (
-        <Button size="300" radii="300" onClick={() => setOpen(true)}>
+        <Button
+          size="300"
+          radii="300"
+          onClick={() => setOpen(true)}
+          disabled={loading}
+          before={loading && <Spinner size="100" variant="Primary" fill="Solid" />}
+        >
           <Text as="span" size="B300">
             Enable
           </Text>
         </Button>
       )}
       {open && (
-        <Overlay open backdrop={<OverlayBackdrop />}>
-          <OverlayCenter>
-            <FocusTrap
-              focusTrapOptions={{
-                initialFocus: false,
-                clickOutsideDeactivates: false,
-                escapeDeactivates: false,
-              }}
-            >
-              <DeviceVerificationSetup onCancel={handleCancel} />
-            </FocusTrap>
-          </OverlayCenter>
-        </Overlay>
+        <ModalOverlay
+          requestClose={handleCancel}
+          dismissOnClickOutside={false}
+          escapeDeactivates={false}
+        >
+          <DeviceVerificationSetup onCancel={handleCancel} />
+        </ModalOverlay>
       )}
     </>
   );
@@ -256,6 +319,7 @@ export function EnableVerification({ visible }: EnableVerificationProps) {
 export function DeviceVerificationOptions() {
   const [menuCords, setMenuCords] = useState<RectCords>();
   const authMetadata = useAuthMetadata();
+  const mx = useMatrixClient();
   const accountManagementActions = useAccountManagementActions();
 
   const [reset, setReset] = useState(false);
@@ -271,15 +335,20 @@ export function DeviceVerificationOptions() {
   const handleReset = () => {
     setMenuCords(undefined);
 
-    if (authMetadata) {
-      const authUrl = authMetadata.account_management_uri ?? authMetadata.issuer;
-      window.open(
-        withSearchParam(authUrl, {
-          action: accountManagementActions.crossSigningReset,
-        }),
-        '_blank'
-      );
-      return;
+    const url = getAccountManagementUrl(
+      authMetadata,
+      accountManagementActions.crossSigningReset,
+      undefined,
+      mx.getHomeserverUrl()
+    );
+    if (url) {
+      if (isTauri()) {
+        import('@tauri-apps/plugin-opener')
+          .then(({ openUrl }) => openUrl(url))
+          .catch(() => window.open(url, '_blank'));
+      } else {
+        window.open(url, '_blank');
+      }
     }
 
     setReset(true);
@@ -294,7 +363,7 @@ export function DeviceVerificationOptions() {
         radii="300"
         onClick={handleMenu}
       >
-        <Icon size="100" src={Icons.VerticalDots} />
+        {menuIcon(DotsThreeOutlineVerticalIcon, { weight: menuCords ? 'fill' : 'regular' })}
       </IconButton>
       <PopOut
         anchor={menuCords}
@@ -333,19 +402,13 @@ export function DeviceVerificationOptions() {
         }
       />
       {reset && (
-        <Overlay open backdrop={<OverlayBackdrop />}>
-          <OverlayCenter>
-            <FocusTrap
-              focusTrapOptions={{
-                initialFocus: false,
-                clickOutsideDeactivates: false,
-                escapeDeactivates: false,
-              }}
-            >
-              <DeviceVerificationReset onCancel={handleCancelReset} />
-            </FocusTrap>
-          </OverlayCenter>
-        </Overlay>
+        <ModalOverlay
+          requestClose={handleCancelReset}
+          dismissOnClickOutside={false}
+          escapeDeactivates={false}
+        >
+          <DeviceVerificationReset onCancel={handleCancelReset} />
+        </ModalOverlay>
       )}
     </>
   );

@@ -1,11 +1,24 @@
-import { Box, Button, config, Icon, Icons, Scroll, Text } from 'folds';
-import { SyntheticEvent, useCallback, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Box, Button, color, config, Menu, MenuItem, Scroll, Text, toRem } from 'folds';
+import type { Position, RectCords } from 'folds';
+import type { CSSProperties } from 'react';
+import { useLayoutEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { useAtomValue } from 'jotai';
-import { Opts as LinkifyOpts } from 'linkifyjs';
-import { HTMLReactParserOptions } from 'html-react-parser';
-import { getMxIdServer, mxcUrlToHttp } from '$utils/matrix';
-import { getMemberAvatarMxc, getMemberDisplayName } from '$utils/room';
+import type { Opts as LinkifyOpts } from 'linkifyjs';
+import type { HTMLReactParserOptions } from 'html-react-parser';
+import {
+  ArrowLeft,
+  ArrowRight,
+  CaretDown,
+  CaretUp,
+  ChatCircle,
+  Clock,
+  Heart,
+  profileIcon,
+  User,
+} from '$components/icons/phosphor';
+import { mxcUrlToHttp } from '$utils/matrix';
+import { getMemberAvatarMxc, getMemberDisplayName } from '$utils/room/display';
 import { useMatrixClient } from '$hooks/useMatrixClient';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
 import { usePowerLevels } from '$hooks/usePowerLevels';
@@ -14,14 +27,16 @@ import { useUserPresence } from '$hooks/useUserPresence';
 import { useCloseUserRoomProfile } from '$state/hooks/userRoomProfile';
 import { useIgnoredUsers } from '$hooks/useIgnoredUsers';
 import { useMembership } from '$hooks/useMembership';
-import { Membership } from '$types/matrix/room';
+import { ScreenSize, useScreenSizeContext } from '$hooks/useScreenSize';
+
 import { useRoomCreators } from '$hooks/useRoomCreators';
 import { useRoomPermissions } from '$hooks/useRoomPermissions';
 import { useMemberPowerCompare } from '$hooks/useMemberPowerCompare';
 import { getDirectCreatePath, withSearchParam } from '$pages/pathUtils';
-import { DirectCreateSearchParams } from '$pages/paths';
+import type { DirectCreateSearchParams } from '$pages/paths';
 import { nicknamesAtom } from '$state/nicknames';
-import { UserProfile, useUserProfile } from '$hooks/useUserProfile';
+import type { UserProfile } from '$hooks/useUserProfile';
+import { useUserProfile } from '$hooks/useUserProfile';
 import {
   factoryRenderLinkifyWithMention,
   getReactCustomHtmlParser,
@@ -34,68 +49,94 @@ import { RenderBody } from '$components/message';
 import { getSettings, settingsAtom } from '$state/settings';
 import { filterPronounsByLanguage } from '$utils/pronouns';
 import { useSetting } from '$state/hooks/settings';
+import { useSettingsLinkBaseUrl } from '$features/settings/useSettingsLinkBaseUrl';
+import { getMxIdServer } from '$utils/mxIdHelper';
+import { TextViewerContent } from '$components/text-viewer';
+import { areColorsTooSimilar, shadeColor } from '$utils/shadeColor';
+import { ThemeKind, useTheme } from '$hooks/useTheme';
+import { heroMenuItemStyle } from './heroMenuItemStyle';
 import { CreatorChip } from './CreatorChip';
 import { UserInviteAlert, UserBanAlert, UserModeration, UserKickAlert } from './UserModeration';
 import { PowerChip } from './PowerChip';
 import { IgnoredUserAlert, MutualRoomsChip, OptionsChip, ServerChip, ShareChip } from './UserChips';
 import { UserHero, UserHeroName } from './UserHero';
+import { KnownMembership } from '$types/matrix-sdk';
+import { useRoomMemberHydration } from '$hooks/useRoomMemberHydration';
+import { useMentionClickHandler } from '$hooks/useMentionClickHandler';
+import * as css from './styles.css';
+import * as prefix from '$unstable/prefixes';
+import type { Persona } from '$app/persona';
+import { usePersonaCosmetics } from '$hooks/usePerMessageProfile';
 
-const KNOWN_KEYS = [
-  'moe.sable.app.bio',
-  'chat.commet.profile_bio',
-  'chat.commet.profile_banner',
-  'chat.commet.profile_status',
-  'io.fsky.nyx.pronouns',
-  'us.cloke.msc4175.tz',
-  'm.tz',
-  'moe.sable.app.name_color',
+const KNOWN_KEYS = new Set([
+  prefix.MATRIX_SABLE_UNSTABLE_PROFILE_BIOGRAPHY_PROPERTY_NAME,
+  prefix.MATRIX_COMMET_UNSTABLE_PROFILE_BIO_PROPERTY_NAME,
+  prefix.MATRIX_UNSTABLE_PROFILE_BANNER_PROPERTY_NAME,
+  prefix.MATRIX_COMMET_UNSTABLE_PROFILE_STATUS_PROPERTY_NAME,
+  prefix.MATRIX_UNSTABLE_PROFILE_PRONOUNS_PROPERTY_NAME,
+  prefix.MATRIX_UNSTABLE_PROFILE_TIMEZONE_PROPERTY_NAME,
+  prefix.MATRIX_STABLE_PROFILE_TIMEZONE_PROPERTY_NAME,
+  prefix.MATRIX_UNSTABLE_COLORS,
+  prefix.MATRIX_SABLE_UNSTABLE_NAME_COLOR_PROPERTY_NAME,
   'avatar_url',
   'displayname',
-  'kitty.meow.has_cats',
-  'kitty.meow.is_cat',
-];
+  prefix.MATRIX_SABLE_UNSTABLE_ANIMAL_IDENTITY_IS_CAT_PROPERTY_NAME,
+  prefix.MATRIX_SABLE_UNSTABLE_ANIMAL_IDENTITY_HAS_CAT_PROPERTY_NAME,
+]);
 
 type UserExtendedSectionProps = {
   profile: UserProfile;
+  pmp?: Persona;
   htmlReactParserOptions: HTMLReactParserOptions;
   linkifyOpts: LinkifyOpts;
+  innerColor?: string;
+  cardColor?: string;
+  textColor?: string;
+};
+
+const renderValue = (val: unknown) => {
+  if (val === null || val === undefined) return 'n/a';
+  if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+  if (typeof val === 'object') return JSON.stringify(val);
+  return String(val as string | number | boolean);
 };
 
 function UserExtendedSection({
   profile,
+  pmp,
   htmlReactParserOptions,
   linkifyOpts,
+  innerColor,
+  cardColor,
+  textColor,
 }: Readonly<UserExtendedSectionProps>) {
-  const clamp = (str: any, len: number) => {
-    const stringified = String(str ?? '');
-    return stringified.length > len ? `${stringified.slice(0, len)}...` : stringified;
-  };
-  const [showMore, setShowMore] = useState(false);
+  const [showMisc, setShowMisc] = useState(false);
+  const [miscDataIndex, setMiscDataIndex] = useState(-1);
+  const screenSize = useScreenSizeContext();
 
   const [renderAnimals] = useSetting(settingsAtom, 'renderAnimals');
+  const [hour24Clock] = useSetting(settingsAtom, 'hour24Clock');
+
   const isCat = profile.isCat === true;
   const hasCats = profile.hasCats === true;
+  const isAnimal = profile.isAnimal ?? (isCat && 'cat');
+  const hasAnimal = profile.hasAnimal ?? (hasCats && 'cats');
+  const animalNeed = profile.animalNeed ?? 'headpats';
 
   const catStatusText = useMemo(() => {
     if (!renderAnimals) return null;
-    if (isCat && hasCats) return 'Cat with cats—needs pets & love!';
-    if (isCat) return 'Is a cat—give pets & love!';
-    if (hasCats) return 'Has cats—send love!';
+    const animalGive = animalNeed ? `, give ${animalNeed}!` : '!';
+    if (isAnimal && hasAnimal) return `${isAnimal} with ${hasAnimal}${animalGive}`;
+    if (isAnimal) return `Is ${isAnimal}${animalGive}`;
+    if (hasAnimal) return `Has ${hasAnimal}${animalGive}`;
     return null;
-  }, [renderAnimals, isCat, hasCats]);
-
-  const renderValue = (val: any) => {
-    if (val === null || val === undefined) return 'n/a';
-    if (typeof val === 'boolean') return val ? 'Yes' : 'No';
-    if (typeof val === 'object') return JSON.stringify(val);
-    return String(val);
-  };
+  }, [renderAnimals, isAnimal, hasAnimal, animalNeed]);
 
   const languageFilterEnabled = getSettings().filterPronounsBasedOnLanguage ?? false;
   const languagesToFilterFor = getSettings().filterPronounsLanguages ?? ['en'];
 
   const pronouns = filterPronounsByLanguage(
-    profile.pronouns,
+    pmp?.['io.fsky.nyx.pronouns'] ?? profile.pronouns,
     languageFilterEnabled,
     languagesToFilterFor
   )
@@ -109,22 +150,23 @@ function UserExtendedSection({
         hour: 'numeric',
         minute: '2-digit',
         timeZone: profile.timezone.replaceAll(/^["']|["']$/g, ''),
+        hour12: !hour24Clock,
       }).format(new Date());
     } catch {
       return null;
     }
-  }, [profile.timezone]);
+  }, [profile.timezone, hour24Clock]);
 
   const bioContent = useMemo(() => {
     let rawBio =
-      profile.extended?.['moe.sable.app.bio'] ||
-      profile.extended?.['chat.commet.profile_bio'] ||
+      profile.extended?.[prefix.MATRIX_SABLE_UNSTABLE_PROFILE_BIOGRAPHY_PROPERTY_NAME] ||
+      profile.extended?.[prefix.MATRIX_COMMET_UNSTABLE_PROFILE_BIO_PROPERTY_NAME] ||
       profile.bio;
 
     if (!rawBio) return null;
 
     if (typeof rawBio === 'object' && rawBio !== null && 'formatted_body' in rawBio) {
-      rawBio = rawBio.formatted_body;
+      rawBio = (rawBio as { formatted_body: string }).formatted_body;
     }
 
     if (typeof rawBio !== 'string') {
@@ -144,16 +186,98 @@ function UserExtendedSection({
   }, [profile]);
 
   const unknownFields = Object.entries(profile.extended || {}).filter(
-    ([key]) => !KNOWN_KEYS.includes(key)
+    ([key]) => !KNOWN_KEYS.has(key)
   );
+  const selectedUnknownField = miscDataIndex > -1 ? unknownFields[miscDataIndex] : undefined;
 
+  function handleMiscSelector(index: number) {
+    setMiscDataIndex(index);
+    setShowMisc(false);
+  }
+
+  const miscSelector = useMemo(() => {
+    if (unknownFields.length === 1 && showMisc) {
+      setShowMisc(false);
+      setMiscDataIndex(miscDataIndex === -1 ? 0 : -1);
+      return null;
+    }
+    return (
+      <Menu
+        style={{
+          position: 'absolute',
+          zIndex: '100',
+          transform:
+            screenSize === ScreenSize.Mobile && unknownFields.length > 1
+              ? `translateY(calc(-100% - ${toRem(32)}))`
+              : `translateY(${toRem(32)})`,
+          backgroundColor: innerColor,
+        }}
+      >
+        <MenuItem
+          size="300"
+          radii="300"
+          fill="None"
+          style={{
+            justifyContent: 'Center',
+            textAlign: 'center',
+            backgroundColor: cardColor,
+            color: textColor,
+          }}
+          onClick={() => handleMiscSelector(-1)}
+        >
+          {profileIcon(CaretUp)}
+          <Text>Show less</Text>
+        </MenuItem>
+        {unknownFields.map(([key], index) => (
+          <MenuItem
+            key={key}
+            size="300"
+            radii="300"
+            fill="None"
+            style={{ justifyContent: 'Center', backgroundColor: cardColor, color: textColor }}
+            onClick={() => handleMiscSelector(index)}
+          >
+            <Text>{key}</Text>
+          </MenuItem>
+        ))}
+      </Menu>
+    );
+  }, [cardColor, innerColor, miscDataIndex, screenSize, showMisc, textColor, unknownFields]);
+  const miscHeader = useMemo(
+    () => (
+      <Box justifyContent="Center" grow="Yes">
+        <Button
+          fill="None"
+          size="300"
+          className={css.MiscDataToggleButton}
+          onClick={() => setShowMisc(!showMisc)}
+          after={profileIcon(miscDataIndex === -1 ? CaretDown : CaretUp)}
+          style={{
+            padding: '1rem',
+            justifyContent: 'flex-start',
+            width: 'fit-content',
+            textAlign: 'center',
+            color: textColor,
+          }}
+        >
+          <Text size="T200" priority="400">
+            {miscDataIndex === -1
+              ? `Show Misc. Data (${unknownFields.length} value${unknownFields.length > 1 ? 's' : ''})`
+              : `${selectedUnknownField?.[0] ?? 'Unknown'} ${unknownFields.length > 1 ? `(${miscDataIndex + 1}/${unknownFields.length})` : ''}`}
+          </Text>
+        </Button>
+        {showMisc && miscSelector}
+      </Box>
+    ),
+    [miscSelector, miscDataIndex, selectedUnknownField, showMisc, unknownFields, textColor]
+  );
   return (
-    <Box direction="Column" gap="200" style={{ marginBottom: config.space.S100 }}>
-      {(pronouns || localTime) && (
+    <Box direction="Column" gap="200" style={{ marginBottom: config.space.S100, color: textColor }}>
+      {(pronouns || localTime || catStatusText) && (
         <Box alignItems="Center" gap="300" wrap="Wrap">
           {pronouns && (
             <Box alignItems="Center" gap="100">
-              <Icon size="50" src={Icons.User} style={{ opacity: 0.5 }} />
+              {profileIcon(User, { style: { opacity: 0.5 } })}
               <Text size="T200" priority="400">
                 {pronouns}
               </Text>
@@ -161,7 +285,7 @@ function UserExtendedSection({
           )}
           {localTime && profile.timezone && (
             <Box alignItems="Center" gap="100">
-              <Icon size="50" src={Icons.Clock} style={{ opacity: 0.5 }} />
+              {profileIcon(Clock, { style: { opacity: 0.5 } })}
               <Text size="T200" priority="400">
                 {localTime} ({profile.timezone.replaceAll(/^["']|["']$/g, '')})
               </Text>
@@ -169,7 +293,7 @@ function UserExtendedSection({
           )}
           {catStatusText && (
             <Box alignItems="Center" gap="100">
-              <Icon size="50" src={Icons.Heart} style={{ opacity: 0.5 }} />
+              {profileIcon(Heart, { style: { opacity: 0.5 } })}
               <Text size="T200" priority="400">
                 {catStatusText}
               </Text>
@@ -186,14 +310,21 @@ function UserExtendedSection({
           visibility="Always"
           size="300"
           style={{
-            backgroundColor: 'var(--sable-bg-container)',
+            backgroundColor: cardColor,
             borderRadius: config.radii.R400,
+            boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.1)',
             maxHeight: '200px',
             marginTop: config.space.S0,
             overflowY: 'auto',
           }}
         >
-          <Box style={{ padding: config.space.S200, wordBreak: 'break-word' }}>
+          <Box
+            style={{
+              padding: config.space.S200,
+              wordBreak: 'break-word',
+              backgroundColor: cardColor,
+            }}
+          >
             <Text size="T200" priority="400" as="div">
               <RenderBody
                 body={bioContent}
@@ -208,39 +339,73 @@ function UserExtendedSection({
 
       {unknownFields.length > 0 && (
         <Box direction="Column" gap="100">
-          <Button
-            variant="Secondary"
-            size="300"
-            fill="None"
-            onClick={() => setShowMore(!showMore)}
-            after={<Icon size="50" src={showMore ? Icons.ChevronTop : Icons.ChevronBottom} />}
-            style={{ padding: '1rem', justifyContent: 'flex-start', width: 'fit-content' }}
-          >
-            <Text size="T200" priority="400">
-              {showMore ? 'Show less' : `+ ${unknownFields.length} more info`}
-            </Text>
-          </Button>
-
-          {showMore && (
-            <Box
-              direction="Column"
+          {miscDataIndex === -1 && miscHeader}
+          {miscDataIndex > -1 && (
+            <div
               style={{
-                padding: config.space.S200,
-                backgroundColor: 'var(--sable-surface-container)',
+                backgroundColor: cardColor,
                 borderRadius: config.radii.R400,
+                boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.1)',
+                overflow: 'hidden',
               }}
             >
-              {unknownFields.map(([key, value]) => (
-                <Box key={key} direction="Column" style={{ marginBottom: config.space.S100 }}>
-                  <Text size="T200" priority="400" style={{ letterSpacing: '0.05em' }}>
-                    {key}
-                  </Text>
-                  <Text size="T200" priority="300">
-                    {clamp(renderValue(value), 128)}
-                  </Text>
+              <Box direction="Row" justifyContent="Center" alignContent="Center">
+                {unknownFields.length > 1 && (
+                  <Button
+                    size="300"
+                    fill="None"
+                    className={css.MiscDataToggleButton}
+                    onClick={() =>
+                      setMiscDataIndex(
+                        miscDataIndex === 0 ? unknownFields.length - 1 : miscDataIndex - 1
+                      )
+                    }
+                    style={{ color: textColor }}
+                  >
+                    {profileIcon(ArrowLeft)}
+                  </Button>
+                )}
+                {miscHeader}
+                {unknownFields.length > 1 && (
+                  <Button
+                    size="300"
+                    fill="None"
+                    className={css.MiscDataToggleButton}
+                    onClick={() => setMiscDataIndex((miscDataIndex + 1) % unknownFields.length)}
+                    style={{ color: textColor }}
+                  >
+                    {profileIcon(ArrowRight)}
+                  </Button>
+                )}
+              </Box>
+              <Scroll
+                size="300"
+                direction="Both"
+                visibility="Hover"
+                hideTrack
+                variant="SurfaceVariant"
+                style={{
+                  backgroundColor: color.SurfaceVariant.Container,
+                  color: color.SurfaceVariant.OnContainer,
+                  fontFamily: 'monospace',
+                  boxShadow:
+                    'inset 0 2px 0 rgba(0, 0, 0, 0.65), inset 0 4px 6px -2px rgba(0, 0, 0, 0.35)',
+                }}
+              >
+                <Box
+                  direction="Column"
+                  style={{
+                    padding: config.space.S200,
+                    maxHeight: toRem(100),
+                  }}
+                >
+                  <TextViewerContent
+                    text={renderValue(selectedUnknownField?.[1])}
+                    langName="json"
+                  />
                 </Box>
-              ))}
-            </Box>
+              </Scroll>
+            </div>
           )}
         </Box>
       )}
@@ -250,9 +415,21 @@ function UserExtendedSection({
 
 type UserRoomProfileProps = {
   userId: string;
+  pmp?: Persona;
   initialProfile?: Partial<UserProfile>;
+  onSurfaceColorChange?: (color: string) => void;
+  anchor: RectCords;
+  position?: Position;
 };
-export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomProfileProps>) {
+export function UserRoomProfile({
+  userId,
+  pmp: initialPmp,
+  initialProfile,
+  onSurfaceColorChange,
+  anchor,
+  position,
+}: Readonly<UserRoomProfileProps>) {
+  const theme = useTheme();
   const mx = useMatrixClient();
   const useAuthentication = useMediaAuthentication();
   const navigate = useNavigate();
@@ -279,13 +456,14 @@ export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomPro
 
   const member = room.getMember(userId);
   const membership = useMembership(room, userId);
+  const bannedMembership: string = KnownMembership.Ban;
+  const invitedMembership: string = KnownMembership.Invite;
+  const joinedMembership: string = KnownMembership.Join;
+  const leftMembership: string = KnownMembership.Leave;
 
   const server = getMxIdServer(userId);
   const nicknames = useAtomValue(nicknamesAtom);
   const displayName = getMemberDisplayName(room, userId, nicknames);
-  const avatarMxc = getMemberAvatarMxc(room, userId);
-  const avatarUrl = (avatarMxc && mxcUrlToHttp(mx, avatarMxc, useAuthentication)) ?? undefined;
-
   const presence = useUserPresence(userId);
 
   const fetchedProfile = useUserProfile(userId, room);
@@ -293,6 +471,20 @@ export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomPro
     fetchedProfile && Object.keys(fetchedProfile).length > 0
       ? fetchedProfile
       : (initialProfile as UserProfile) || fetchedProfile;
+
+  useRoomMemberHydration(room, userId);
+
+  const [pmp, setPmp] = useState(initialPmp);
+  const { avatarUrl: getPmpAvatarUrl } = usePersonaCosmetics(mx, false);
+  const pmpAvatarUrl = pmp?.avatar_url ? getPmpAvatarUrl?.(pmp) : null;
+
+  const handleClearPmp = () => {
+    setPmp(undefined);
+  };
+
+  const avatarMxc = getMemberAvatarMxc(room, userId) ?? extendedProfile.avatarUrl;
+  const avatarUrl =
+    pmpAvatarUrl ?? (avatarMxc && mxcUrlToHttp(mx, avatarMxc, useAuthentication)) ?? undefined;
 
   const parsedBanner =
     typeof extendedProfile.bannerUrl === 'string'
@@ -311,25 +503,26 @@ export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomPro
     navigate(withSearchParam(getDirectCreatePath(), directSearchParam));
   };
 
-  // Todo eventually maybe
-  const mentionClickHandler = useCallback((e: SyntheticEvent<HTMLElement>) => {
-    e.preventDefault();
-  }, []);
+  const mentionClickHandler = useMentionClickHandler(room.roomId, anchor, position);
+  const settingsLinkBaseUrl = useSettingsLinkBaseUrl();
 
   const linkifyOpts = useMemo<LinkifyOpts>(
     () => ({
       ...LINKIFY_OPTS,
-      render: factoryRenderLinkifyWithMention((href) =>
-        renderMatrixMention(
-          mx,
-          room.roomId,
-          href,
-          makeMentionCustomProps(mentionClickHandler),
-          nicknames
-        )
+      render: factoryRenderLinkifyWithMention(
+        settingsLinkBaseUrl,
+        (href) =>
+          renderMatrixMention(
+            mx,
+            room.roomId,
+            href,
+            makeMentionCustomProps(mentionClickHandler),
+            nicknames
+          ),
+        mentionClickHandler
       ),
     }),
-    [mx, room, mentionClickHandler, nicknames]
+    [mx, room, mentionClickHandler, nicknames, settingsLinkBaseUrl]
   );
 
   const spoilerClickHandler = useSpoilerClickHandler();
@@ -337,15 +530,89 @@ export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomPro
   const htmlReactParserOptions = useMemo<HTMLReactParserOptions>(
     () =>
       getReactCustomHtmlParser(mx, room.roomId, {
+        settingsLinkBaseUrl,
         linkifyOpts,
         useAuthentication,
         handleSpoilerClick: spoilerClickHandler,
+        handleMentionClick: mentionClickHandler,
       }),
-    [mx, room, linkifyOpts, useAuthentication, spoilerClickHandler]
+    [
+      mx,
+      room,
+      linkifyOpts,
+      settingsLinkBaseUrl,
+      useAuthentication,
+      spoilerClickHandler,
+      mentionClickHandler,
+    ]
   );
 
+  const backgroundColor = fetchedProfile.heroColor ?? color.Surface.Container;
+
+  useLayoutEffect(() => {
+    onSurfaceColorChange?.(backgroundColor);
+  }, [backgroundColor, onSurfaceColorChange]);
+
+  const fetchedBrightness = fetchedProfile?.heroBrightness;
+  const isBackgroundDark = fetchedBrightness ? fetchedBrightness === 'dark' : undefined;
+  const innerColor = shadeColor(backgroundColor, isBackgroundDark ? -50 : 50);
+  const cardColor =
+    shadeColor(backgroundColor, isBackgroundDark ? -80 : 80) ?? color.Background.Container;
+  const textColor =
+    ((fetchedBrightness === 'dark' || areColorsTooSimilar('#000000', innerColor)) && '#FFFFFF') ||
+    ((fetchedBrightness === 'light' || areColorsTooSimilar('#FFFFFF', innerColor)) && '#000000') ||
+    undefined;
+
+  const showCustomHeroCard = !!fetchedProfile.heroColor;
+
+  const chipFillColor =
+    shadeColor(innerColor, fetchedBrightness === 'light' ? -14 : 32) ?? cardColor;
+  const chipHoverBrightness =
+    fetchedBrightness === 'light'
+      ? 0.94
+      : fetchedBrightness === 'dark'
+        ? 1.12
+        : theme.kind === ThemeKind.Dark
+          ? 1.12
+          : 0.94;
+  const chipSurfaceStyle: CSSProperties | undefined =
+    showCustomHeroCard && chipFillColor
+      ? ({
+          backgroundColor: chipFillColor,
+          borderColor: 'transparent',
+          color: textColor,
+          '--user-hero-chip-hover-brightness': chipHoverBrightness,
+        } as CSSProperties)
+      : undefined;
+
+  const chipMenuTextColor = textColor ?? color.Surface.OnContainer;
+  const chipColors = showCustomHeroCard
+    ? {
+        innerColor,
+        cardColor,
+        textColor: chipMenuTextColor,
+        chipSurfaceStyle,
+        chipFillColor,
+        chipHoverBrightness,
+      }
+    : {
+        innerColor: color.Surface.Container,
+        chipFillColor: color.SurfaceVariant.Container,
+        textColor: color.SurfaceVariant.OnContainer,
+        chipHoverBrightness,
+      };
+
   return (
-    <Box direction="Column">
+    <Box
+      direction="Column"
+      style={{
+        color: textColor,
+        maxHeight: 'calc(85vh - 2rem)',
+        overflowY: 'auto',
+        overscrollBehavior: 'contain',
+        touchAction: 'pan-y',
+      }}
+    >
       <UserHero
         userId={userId}
         avatarUrl={avatarUrl}
@@ -353,19 +620,47 @@ export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomPro
         presence={presence && presence.lastActiveTs !== 0 ? presence : undefined}
         autoplayGifs={autoplayGifs}
       />
-      <Box direction="Column" gap="300" style={{ padding: config.space.S400 }}>
-        <Box direction="Column" gap="200">
-          <Box gap="200" alignItems="Center" wrap="Wrap">
-            <UserHeroName displayName={displayName} userId={userId} />
+      <Box
+        direction="Column"
+        gap="300"
+        style={{
+          padding: showCustomHeroCard && innerColor ? config.space.S200 : config.space.S0,
+          backgroundColor,
+        }}
+      >
+        <Box
+          direction="Column"
+          gap="200"
+          style={{
+            backgroundColor: innerColor,
+            borderRadius: toRem(5),
+            boxShadow: showCustomHeroCard ? 'inset 0 1px 2px rgba(0, 0, 0, 0.1)' : undefined,
+            padding: showCustomHeroCard && innerColor ? config.space.S200 : config.space.S300,
+          }}
+        >
+          <Box gap="200" alignItems="Center" wrap="Wrap" style={{ color: textColor }}>
+            <UserHeroName
+              displayName={pmp?.displayname ?? displayName}
+              userId={userId}
+              customHeroCards={showCustomHeroCard}
+              server={server}
+              pmp={pmp}
+              clearPmp={handleClearPmp}
+            />
             {userId !== myUserId && (
               <Button
                 size="300"
                 variant="Primary"
                 fill="Solid"
                 radii="300"
-                before={<Icon size="50" src={Icons.Message} filled />}
+                before={profileIcon(ChatCircle, { filled: true })}
                 onClick={handleMessage}
-                style={{ marginLeft: 'auto' }}
+                className={showCustomHeroCard ? css.UserHeroChipThemed : css.UserHeroChip}
+                style={{
+                  marginLeft: 'auto',
+                  ...(showCustomHeroCard && chipSurfaceStyle ? chipSurfaceStyle : {}),
+                  ...heroMenuItemStyle({}, chipHoverBrightness),
+                }}
               >
                 <Text size="B300">Message</Text>
               </Button>
@@ -373,52 +668,60 @@ export function UserRoomProfile({ userId, initialProfile }: Readonly<UserRoomPro
           </Box>
           <UserExtendedSection
             profile={extendedProfile}
+            pmp={pmp}
             htmlReactParserOptions={htmlReactParserOptions}
             linkifyOpts={linkifyOpts}
+            innerColor={innerColor}
+            cardColor={cardColor}
+            textColor={textColor}
           />
-          <Box alignItems="Center" gap="100" wrap="Wrap">
-            {server && <ServerChip server={server} />}
-            <ShareChip userId={userId} />
-            {creator ? <CreatorChip /> : <PowerChip userId={userId} />}
-            {userId !== myUserId && <MutualRoomsChip userId={userId} />}
-            {userId !== myUserId && <OptionsChip userId={userId} />}
+          <Box alignItems="Center" gap="100" wrap="Wrap" justifyContent="Center">
+            {server && <ServerChip server={server} {...chipColors} />}
+            <ShareChip userId={userId} {...chipColors} />
+            {creator ? (
+              <CreatorChip {...chipColors} />
+            ) : (
+              <PowerChip userId={userId} {...chipColors} />
+            )}
+            {userId !== myUserId && <MutualRoomsChip userId={userId} {...chipColors} />}
+            {userId !== myUserId && <OptionsChip userId={userId} {...chipColors} />}
           </Box>
-        </Box>
-        {ignored && <IgnoredUserAlert />}
-        {member && membership === Membership.Ban && (
-          <UserBanAlert
-            userId={userId}
-            reason={member.events.member?.getContent().reason}
-            canUnban={canUnban}
-            bannedBy={member.events.member?.getSender()}
-            ts={member.events.member?.getTs()}
-          />
-        )}
-        {member &&
-          membership === Membership.Leave &&
-          member.events.member &&
-          member.events.member.getSender() !== userId && (
-            <UserKickAlert
+          {ignored && <IgnoredUserAlert />}
+          {member && membership === bannedMembership && (
+            <UserBanAlert
+              userId={userId}
               reason={member.events.member?.getContent().reason}
-              kickedBy={member.events.member?.getSender()}
+              canUnban={canUnban}
+              bannedBy={member.events.member?.getSender()}
               ts={member.events.member?.getTs()}
             />
           )}
-        {member && membership === Membership.Invite && (
-          <UserInviteAlert
+          {member &&
+            membership === leftMembership &&
+            member.events.member &&
+            member.events.member.getSender() !== userId && (
+              <UserKickAlert
+                reason={member.events.member?.getContent().reason}
+                kickedBy={member.events.member?.getSender()}
+                ts={member.events.member?.getTs()}
+              />
+            )}
+          {member && membership === invitedMembership && (
+            <UserInviteAlert
+              userId={userId}
+              reason={member.events.member?.getContent().reason}
+              canKick={canKickUser}
+              invitedBy={member.events.member?.getSender()}
+              ts={member.events.member?.getTs()}
+            />
+          )}
+          <UserModeration
             userId={userId}
-            reason={member.events.member?.getContent().reason}
-            canKick={canKickUser}
-            invitedBy={member.events.member?.getSender()}
-            ts={member.events.member?.getTs()}
+            canInvite={canInvite && membership === leftMembership}
+            canKick={canKickUser && membership === joinedMembership}
+            canBan={canBanUser && membership !== bannedMembership}
           />
-        )}
-        <UserModeration
-          userId={userId}
-          canInvite={canInvite && membership === Membership.Leave}
-          canKick={canKickUser && membership === Membership.Join}
-          canBan={canBanUser && membership !== Membership.Ban}
-        />
+        </Box>
       </Box>
     </Box>
   );

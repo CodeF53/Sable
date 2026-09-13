@@ -1,117 +1,50 @@
+import { useCallback } from 'react';
+import type { IPushRules, RuleId } from '$types/matrix-sdk';
+import { type PushRuleData, usePushRule } from '$hooks/usePushRule';
 import {
-  Box,
-  Button,
-  config,
-  Icon,
-  Icons,
-  Menu,
-  MenuItem,
-  PopOut,
-  RectCords,
-  Spinner,
-  Text,
-} from 'folds';
-import { IPushRule } from '$types/matrix-sdk';
-import { MouseEventHandler, useMemo, useState } from 'react';
-import FocusTrap from 'focus-trap-react';
-import { NotificationMode, useNotificationActionsMode } from '$hooks/useNotificationMode';
-import { stopPropagation } from '$utils/keyboard';
+  type NotificationMode,
+  type NotificationModeOptions,
+  useNotificationActionsMode,
+  useNotificationModeActions,
+} from '$hooks/useNotificationMode';
 import { AsyncStatus, useAsyncCallback } from '$hooks/useAsyncCallback';
+import { useMatrixClient } from '$hooks/useMatrixClient';
+import { SettingMenuSelector } from '$components/setting-menu-selector';
+import { notificationModeSelectorOptions } from './notificationModeOptions';
 
-export const useNotificationModes = (): NotificationMode[] =>
-  useMemo(() => [NotificationMode.NotifyLoud, NotificationMode.Notify, NotificationMode.OFF], []);
+export type NotificationModeSwitcherProps = {
+  ruleId: RuleId;
+  pushRules: IPushRules;
+  defaultPushRuleData: PushRuleData;
+  modeOptions?: NotificationModeOptions;
+};
 
-const useNotificationModeStr = (): Record<NotificationMode, string> =>
-  useMemo(
-    () => ({
-      [NotificationMode.OFF]: 'Disable',
-      [NotificationMode.Notify]: 'Notify Silent',
-      [NotificationMode.NotifyLoud]: 'Notify Loud',
-    }),
-    []
+export function NotificationModeSwitcher({
+  ruleId,
+  pushRules,
+  defaultPushRuleData,
+  modeOptions,
+}: NotificationModeSwitcherProps) {
+  const mx = useMatrixClient();
+  const { kind, pushRule } = usePushRule(pushRules, ruleId) ?? defaultPushRuleData;
+  const getModeActions = useNotificationModeActions(modeOptions);
+  const selectedMode = useNotificationActionsMode(pushRule.actions);
+  const [changeState, change] = useAsyncCallback(
+    useCallback(
+      async (mode: NotificationMode) => {
+        const actions = getModeActions(mode);
+        await mx.setPushRuleActions('global', kind, ruleId, actions);
+      },
+      [mx, getModeActions, kind, ruleId]
+    )
   );
 
-type NotificationModeSwitcherProps = {
-  pushRule: IPushRule;
-  onChange: (mode: NotificationMode) => Promise<void>;
-};
-export function NotificationModeSwitcher({ pushRule, onChange }: NotificationModeSwitcherProps) {
-  const modes = useNotificationModes();
-  const modeToStr = useNotificationModeStr();
-  const selectedMode = useNotificationActionsMode(pushRule.actions);
-  const [changeState, change] = useAsyncCallback(onChange);
-  const changing = changeState.status === AsyncStatus.Loading;
-
-  const [menuCords, setMenuCords] = useState<RectCords>();
-
-  const handleMenu: MouseEventHandler<HTMLButtonElement> = (evt) => {
-    setMenuCords(evt.currentTarget.getBoundingClientRect());
-  };
-
-  const handleSelect = (mode: NotificationMode) => {
-    setMenuCords(undefined);
-    change(mode);
-  };
-
   return (
-    <>
-      <Button
-        size="300"
-        variant="Secondary"
-        outlined
-        fill="Soft"
-        radii="300"
-        after={
-          changing ? (
-            <Spinner variant="Secondary" size="300" />
-          ) : (
-            <Icon size="300" src={Icons.ChevronBottom} />
-          )
-        }
-        onClick={handleMenu}
-        disabled={changing}
-      >
-        <Text size="T300">{modeToStr[selectedMode]}</Text>
-      </Button>
-      <PopOut
-        anchor={menuCords}
-        offset={5}
-        position="Bottom"
-        align="End"
-        content={
-          <FocusTrap
-            focusTrapOptions={{
-              initialFocus: false,
-              onDeactivate: () => setMenuCords(undefined),
-              clickOutsideDeactivates: true,
-              isKeyForward: (evt: KeyboardEvent) =>
-                evt.key === 'ArrowDown' || evt.key === 'ArrowRight',
-              isKeyBackward: (evt: KeyboardEvent) =>
-                evt.key === 'ArrowUp' || evt.key === 'ArrowLeft',
-              escapeDeactivates: stopPropagation,
-            }}
-          >
-            <Menu>
-              <Box direction="Column" gap="100" style={{ padding: config.space.S100 }}>
-                {modes.map((mode) => (
-                  <MenuItem
-                    key={mode}
-                    size="300"
-                    variant="Surface"
-                    aria-selected={mode === selectedMode}
-                    radii="300"
-                    onClick={() => handleSelect(mode)}
-                  >
-                    <Box grow="Yes">
-                      <Text size="T300">{modeToStr[mode]}</Text>
-                    </Box>
-                  </MenuItem>
-                ))}
-              </Box>
-            </Menu>
-          </FocusTrap>
-        }
-      />
-    </>
+    <SettingMenuSelector
+      value={selectedMode}
+      options={notificationModeSelectorOptions}
+      onSelect={change}
+      loading={changeState.status === AsyncStatus.Loading}
+    />
   );
 }

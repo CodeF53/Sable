@@ -1,6 +1,8 @@
-import { Box, Button, Icon, Icons, Text, config, toRem } from 'folds';
+import { Box, Button, Text, config, toRem } from 'folds';
+import { Code, Heart, menuIcon } from '$components/icons/phosphor';
 import { Page, PageHero, PageHeroSection } from '$components/page';
-import CinnySVG from '$public/res/svg/cinny-logo.svg';
+import { versionLabel } from '$utils/platform';
+import LogoSVG from '$public/res/svg/logo.svg';
 
 export function WelcomePage() {
   return (
@@ -13,7 +15,7 @@ export function WelcomePage() {
       >
         <PageHeroSection>
           <PageHero
-            icon={<img width="70" height="70" src={CinnySVG} alt="Cinny Logo" />}
+            icon={<img width="70" height="70" src={LogoSVG} alt="Sable Logo" />}
             title="Welcome to Sable"
             subTitle={
               <span>
@@ -23,7 +25,7 @@ export function WelcomePage() {
                   target="_blank"
                   rel="noreferrer noopener"
                 >
-                  {`v${APP_VERSION}${IS_RELEASE_TAG ? '' : `-dev${BUILD_HASH ? ` (${BUILD_HASH})` : ''}`}`}
+                  {versionLabel()}
                 </a>
               </span>
             }
@@ -35,26 +37,24 @@ export function WelcomePage() {
                   href="https://github.com/SableClient/Sable"
                   target="_blank"
                   rel="noreferrer noopener"
-                  before={<Icon size="200" src={Icons.Code} />}
+                  before={menuIcon(Code)}
                 >
                   <Text as="span" size="B400" truncate>
                     Source Code
                   </Text>
                 </Button>
-                {/*
                 <Button
                   as="a"
-                  href="https://github.com/SableClient/Sable"
+                  href="https://opencollective.com/sable"
                   target="_blank"
                   rel="noreferrer noopener"
                   fill="Soft"
-                  before={<Icon size="200" src={Icons.Heart} />}
+                  before={menuIcon(Heart)}
                 >
                   <Text as="span" size="B400" truncate>
                     Support
                   </Text>
                 </Button>
-                */}
               </Box>
             </Box>
             <Box direction="Column" gap="200" alignItems="Center">
@@ -63,7 +63,7 @@ export function WelcomePage() {
                 href="https://github.com/SableClient/Sable/blob/dev/CHANGELOG.md"
                 target="_blank"
                 rel="noreferrer noopener"
-                before={<Icon size="200" src={Icons.Code} />}
+                before={menuIcon(Code)}
               >
                 <Text as="span" size="B400" truncate>
                   Features

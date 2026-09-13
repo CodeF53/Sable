@@ -1,18 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { as, Box, Text, config, Button, Menu, Spinner } from 'folds';
-import {
-  ImagePack,
-  ImageUsage,
-  PackContent,
-  PackImage,
-  PackImageReader,
-  packMetaEqual,
-  PackMetaReader,
-} from '$plugins/custom-emoji';
+import type { ImagePack, ImageUsage, PackContent, PackImage } from '$plugins/custom-emoji';
+import { PackImageReader, packMetaEqual, PackMetaReader } from '$plugins/custom-emoji';
 import { useMediaAuthentication } from '$hooks/useMediaAuthentication';
 import { useFilePicker } from '$hooks/useFilePicker';
-import { UploadSuccess } from '$state/upload';
-import { getImageInfo, TUploadContent } from '$utils/matrix';
+import type { UploadSuccess } from '$state/upload';
+import type { TUploadContent } from '$utils/matrix';
+import { getImageInfo } from '$utils/matrix';
 import { getImageFileUrl, loadImageElement, renameFile } from '$utils/dom';
 import { replaceSpaceWithDash, suffixRename } from '$utils/common';
 import { getFileNameWithoutExt } from '$utils/mimeTypes';
@@ -25,7 +19,7 @@ import { UsageSwitcher } from './UsageSwitcher';
 import { ImagePackProfile, ImagePackProfileEdit } from './PackMeta';
 import * as css from './style.css';
 
-export type ImagePackContentProps = {
+type ImagePackContentProps = {
   imagePack: ImagePack;
   canEdit?: boolean;
   onUpdate?: (packContent: PackContent) => Promise<void>;
@@ -116,7 +110,13 @@ export const ImagePackContent = as<'div', ImagePackContentProps>(
 
     const handleUploadComplete = useCallback(
       async (data: UploadSuccess) => {
-        const imgEl = await loadImageElement(getImageFileUrl(data.file));
+        const imgUrl = getImageFileUrl(data.file);
+        let imgEl: HTMLImageElement;
+        try {
+          imgEl = await loadImageElement(imgUrl);
+        } finally {
+          URL.revokeObjectURL(imgUrl);
+        }
         const packImage: PackImage = {
           url: data.mxc,
           info: getImageInfo(imgEl, data.file),
